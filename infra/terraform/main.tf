@@ -5,13 +5,6 @@ terraform {
       version = "~> 5.0"
     }
   }
-   backend "s3" {
-    bucket         = "devops-stage6-terraform-state"  
-    key            = "devops-stage-6/terraform.tfstate"
-    region         = "us-east-2"
-    encrypt        = true
-    dynamodb_table = "terraform-lock"  # ADD THIS
-  }
 }
 
 provider "aws" {
