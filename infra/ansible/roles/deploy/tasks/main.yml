@@ -1,0 +1,190 @@
+---
+# infra/ansible/roles/deploy/tasks/main.yml
+
+- name: Create app directory
+  file:
+    path: "/home/{{ ansible_user }}/app"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Check if repository already exists
+  stat:
+    path: "/home/{{ ansible_user }}/app/.git"
+  register: git_repo
+
+- name: Clone application repository (first time)
+  git:
+    repo: "https://github.com/vicogwa/DevOps-Stage-6.git"
+    dest: "/home/{{ ansible_user }}/app"
+    version: main
+    force: yes
+  become_user: "{{ ansible_user }}"
+  when: not git_repo.stat.exists
+  register: git_clone
+
+- name: Pull latest changes (if repo exists)
+  git:
+    repo: "https://github.com/vicogwa/DevOps-Stage-6.git"
+    dest: "/home/{{ ansible_user }}/app"
+    version: main
+    force: yes
+  become_user: "{{ ansible_user }}"
+  when: git_repo.stat.exists
+  register: git_pull
+
+- name: Set git_result variable
+  set_fact:
+    git_result: "{{ git_clone if git_clone.changed else git_pull }}"
+
+- name: Create .env file from template
+  template:
+    src: env.j2
+    dest: "/home/{{ ansible_user }}/app/.env"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0644'
+  register: env_file
+
+- name: Update domain in docker-compose.yml
+  replace:
+    path: "/home/{{ ansible_user }}/app/docker-compose.yml"
+    regexp: 'vicky-hng.zapto.org\.com'
+    replace: "{{ domain_name }}"
+  when: domain_name is defined
+  register: domain_updated
+
+- name: Update email in docker-compose.yml
+  replace:
+    path: "/home/{{ ansible_user }}/app/docker-compose.yml"
+    regexp: 'victoriafrancis885@\.com'
+    replace: "{{ acme_email }}"
+  when: acme_email is defined
+  register: email_updated
+
+- name: Create letsencrypt directory
+  file:
+    path: "/home/{{ ansible_user }}/app/letsencrypt"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Create acme.json file
+  file:
+    path: "/home/{{ ansible_user }}/app/letsencrypt/acme.json"
+    state: touch
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+
+- name: Stop existing containers
+  community.docker.docker_compose:
+    project_src: "/home/{{ ansible_user }}/app"
+    state: absent
+  ignore_errors: yes
+  when: git_result.changed or env_file.changed or domain_updated.changed or email_updated.changed
+
+- name: Build Docker images
+  community.docker.docker_compose:
+    project_src: "/home/{{ ansible_user }}/app"
+    build: yes
+    state: present
+    pull: yes
+  environment:
+    COMPOSE_HTTP_TIMEOUT: "200"
+  when: git_result.changed or env_file.changed or domain_updated.changed or email_updated.changed
+  register: docker_build
+
+- name: Start services with docker-compose
+  community.docker.docker_compose:
+    project_src: "/home/{{ ansible_user }}/app"
+    state: present
+  environment:
+    COMPOSE_HTTP_TIMEOUT: "200"
+  register: docker_compose_result
+
+- name: Wait for Docker containers to be healthy
+  shell: docker compose ps --format json | jq -r '.[].Health' | grep -v "healthy" || true
+  args:
+    chdir: "/home/{{ ansible_user }}/app"
+  register: unhealthy_containers
+  until: unhealthy_containers.stdout == ""
+  retries: 20
+  delay: 10
+  ignore_errors: yes
+
+- name: Check container status
+  command: docker compose ps
+  args:
+    chdir: "/home/{{ ansible_user }}/app"
+  register: container_status
+
+- name: Display container status
+  debug:
+    var: container_status.stdout_lines
+
+- name: Wait for Traefik HTTP
+  wait_for:
+    port: 80
+    host: localhost
+    delay: 10
+    timeout: 60
+  ignore_errors: yes
+
+- name: Wait for Traefik HTTPS
+  wait_for:
+    port: 443
+    host: localhost
+    delay: 20
+    timeout: 300
+  ignore_errors: yes
+
+- name: Check Traefik health
+  uri:
+    url: "http://localhost:8080/api/overview"
+    return_content: yes
+    status_code: 200
+  register: traefik_health
+  until: traefik_health.status == 200
+  retries: 10
+  delay: 10
+  ignore_errors: yes
+
+- name: Wait for application to be ready
+  uri:
+    url: "http://localhost"
+    status_code: 200,301,302
+    validate_certs: no
+  register: app_health
+  until: app_health.status in [200, 301, 302]
+  retries: 15
+  delay: 10
+  ignore_errors: yes
+
+- name: Clean up old Docker images
+  command: docker image prune -af
+  when: docker_build.changed
+  ignore_errors: yes
+
+- name: Get application logs
+  command: docker compose logs --tail=50
+  args:
+    chdir: "/home/{{ ansible_user }}/app"
+  register: app_logs
+  ignore_errors: yes
+
+- name: Display recent application logs
+  debug:
+    msg: "{{ app_logs.stdout_lines }}"
+  when: app_logs.stdout_lines is defined
+
+- name: Deployment summary
+  debug:
+    msg:
+      - "Deployment completed successfully!"
+      - "Application URL: https://{{ domain_name }}"
+      - "Traefik Dashboard: http://{{ ansible_host }}:8080"
+      - "Git status: {{ 'Updated' if git_result.changed else 'No changes' }}"
+      - "Docker status: {{ 'Rebuilt' if docker_build.changed else 'Already up to date' }}"

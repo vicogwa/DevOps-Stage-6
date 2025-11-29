@@ -1,0 +1,46 @@
+---
+- name: Deploy TODO Microservices Application
+  hosts: app_servers
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    ansible_user: ubuntu
+    git_repo_url: "https://github.com/vicogwa/DevOps-Stage-6.git"
+    git_branch: main
+    domain_name: "yourdomain.com"  # CHANGE THIS
+    acme_email: "your-email@example.com"  # CHANGE THIS
+  
+  roles:
+    - dependencies
+    - deploy
+```
+
+---
+
+### ❌ **4. CI/CD Triggers - NOT IMPLEMENTED**
+
+**Current State:** No automated deployments  
+**Required:** GitHub Actions for infra and app changes
+
+**Already provided in previous responses:**
+- `.github/workflows/infrastructure.yml` ✅
+- `.github/workflows/application.yml` ✅
+
+**Make sure these are in your repo!**
+
+---
+
+### ❌ **5. Complete Microservices Containerization**
+
+**Current State:** Some Dockerfiles may be incomplete  
+**Required:** ALL services with proper Dockerfiles + docker-compose.yml
+
+**Verify you have:**
+```
+✅ frontend/Dockerfile
+✅ auth-api/Dockerfile
+✅ todos-api/Dockerfile
+✅ users-api/Dockerfile
+✅ log-message-processor/Dockerfile
+✅ docker-compose.yml (root level)

@@ -1,0 +1,36 @@
+name: Application Deployment
+
+on:
+  push:
+    paths:
+      - 'frontend/**'
+      - 'auth-api/**'
+      - 'todos-api/**'
+      - 'users-api/**'
+      - 'log-processor/**'
+      - 'docker-compose.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+      
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key.pem
+          chmod 600 ~/.ssh/deploy_key.pem
+      
+      - name: Run Ansible Deployment
+        run: |
+          cd infra/ansible
+          ansible-playbook -i inventory playbooks/deploy.yml

@@ -1,6 +1,6 @@
 package com.elgris.usersapi.models;
 
-import javax.persistence.*;
+import jakarta.persistence.*;
 
 @Entity
 @Table(name = "users")

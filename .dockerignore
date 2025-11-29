@@ -1,0 +1,33 @@
+# Node modules
+node_modules
+npm-debug.log
+
+# Python virtual environments
+venv/
+__pycache__/
+*.pyc
+
+# Java/Gradle/IntelliJ/IDE files
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.idea/
+*.iml
+*.ipr
+*.iws
+.gradle/
+build/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+.springBeans
+.settings
+*.class
+
+# Logs and environment files
+*.log
+.env
+
+# Git
+.git
+.gitignore

@@ -4,7 +4,6 @@ import os
 import json
 import requests
 from py_zipkin.zipkin import zipkin_span, ZipkinAttrs, generate_random_64bit_string
-import time
 import random
 
 def log_message(message):
@@ -16,7 +15,8 @@ if __name__ == '__main__':
     redis_host = os.environ['REDIS_HOST']
     redis_port = int(os.environ['REDIS_PORT'])
     redis_channel = os.environ['REDIS_CHANNEL']
-    zipkin_url = os.environ['ZIPKIN_URL'] if 'ZIPKIN_URL' in os.environ else ''
+    zipkin_url = os.environ.get('ZIPKIN_URL', '')
+
     def http_transport(encoded_span):
         requests.post(
             zipkin_url,
@@ -26,18 +26,29 @@ if __name__ == '__main__':
 
     pubsub = redis.Redis(host=redis_host, port=redis_port, db=0).pubsub()
     pubsub.subscribe([redis_channel])
+
     for item in pubsub.listen():
-        try:
-            message = json.loads(str(item['data'].decode("utf-8")))
-        except Exception as e:
-            log_message(e)
+        data = item['data']
+
+        # Skip subscription messages (integers)
+        if isinstance(data, int):
             continue
 
-        if not zipkin_url or 'zipkinSpan' not in message:
-            log_message(message)
+        # Decode if bytes
+        if isinstance(data, bytes):
+            try:
+                data = json.loads(data.decode("utf-8"))
+            except Exception as e:
+                log_message(f"Error parsing JSON: {e}")
+                continue
+
+        # Process normally if no zipkin
+        if not zipkin_url or 'zipkinSpan' not in data:
+            log_message(data)
             continue
 
-        span_data = message['zipkinSpan']
+        # Handle Zipkin tracing
+        span_data = data['zipkinSpan']
         try:
             with zipkin_span(
                 service_name='log-message-processor',
@@ -52,11 +63,7 @@ if __name__ == '__main__':
                 transport_handler=http_transport,
                 sample_rate=100
             ):
-                log_message(message)
+                log_message(data)
         except Exception as e:
             print('did not send data to Zipkin: {}'.format(e))
-            log_message(message)
-
-
-
-
+            log_message(data)

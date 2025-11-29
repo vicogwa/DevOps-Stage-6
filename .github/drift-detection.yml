@@ -1,0 +1,61 @@
+name: Drift Detection
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
+
+jobs:
+  detect-drift:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infra/terraform
+      
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -detailed-exitcode -no-color > plan_output.txt 2>&1 || EXIT_CODE=$?
+          echo "exitcode=$EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+          fi
+        working-directory: infra/terraform
+      
+      - name: Send Drift Alert Email
+        if: steps.plan.outputs.drift_detected == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "🚨 DRIFT DETECTED - DevOps Stage 6"
+          body: |
+            Infrastructure drift has been detected!
+            
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            Please review and approve to fix.
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: DevOps Alert <${{ secrets.EMAIL_USERNAME }}>

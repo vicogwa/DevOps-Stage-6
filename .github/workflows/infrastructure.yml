@@ -1,0 +1,136 @@
+name: Infrastructure Deployment
+
+on:
+  push:
+    paths:
+      - 'infra/terraform/**'
+      - 'infra/ansible/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/terraform
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      drift_detected: ${{ steps.plan.outputs.drift_detected }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.TF_DIR }}
+      
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -out=tfplan -detailed-exitcode || EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "DRIFT DETECTED"
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "NO DRIFT"
+          fi
+          exit 0
+        working-directory: ${{ env.TF_DIR }}
+      
+      - name: Send Drift Alert Email
+        if: steps.plan.outputs.drift_detected == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "⚠️ Terraform Drift Detected"
+          body: |
+            Infrastructure drift has been detected in the TODO application.
+            
+            Please review the changes and approve the workflow run to apply.
+            
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.ALERT_EMAIL }}
+          from: DevOps Alert System
+      
+      - name: Upload plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}/tfplan
+
+  approval:
+    needs: terraform-plan
+    if: needs.terraform-plan.outputs.drift_detected == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Wait for approval
+        run: echo "Waiting for manual approval..."
+
+  terraform-apply:
+    needs: [terraform-plan, approval]
+    if: always() && (needs.approval.result == 'success' || needs.terraform-plan.outputs.drift_detected == 'false')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+      
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key.pem
+          chmod 600 ~/.ssh/deploy_key.pem
+      
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.TF_DIR }}
+      
+      - name: Download plan
+        if: needs.terraform-plan.outputs.drift_detected == 'true'
+        uses: actions/download-artifact@v3
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}
+      
+      - name: Terraform Apply
+        run: |
+          if [ "${{ needs.terraform-plan.outputs.drift_detected }}" == "true" ]; then
+            terraform apply tfplan
+          else
+            terraform apply -auto-approve
+          fi
+        working-directory: ${{ env.TF_DIR }}
