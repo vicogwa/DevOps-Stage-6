@@ -11,5 +11,13 @@ yarn-error.log*
 *.ntvs*
 *.njsproj
 *.sln
+# Terraform
+**/.terraform/*
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*.tfplan
 
-amal/
