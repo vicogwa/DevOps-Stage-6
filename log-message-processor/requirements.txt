@@ -1,3 +1,7 @@
-redis==5.0.1
-requests==2.31.0
-py_zipkin==1.2.8
+redis==2.10.6
+# py_zipkin==0.11.0
+py_zipkin==1.0.0
+requests
+Flask
+opentelemetry-sdk
+opentelemetry-exporter-otlp

@@ -1,49 +1,28 @@
-FROM node:22-alpine AS build
+FROM node:12-alpine
+# FROM node:20.19.6-alpine
+
+# Install Python, make, g++, and other build tools
+# RUN apk add --no-cache \
+#     python3 \
+#     make \
+#     g++ \
+#     git
+
+# Set environment variable to use pre-built binaries when possible
+# ENV SASS_BINARY_SITE=https://github.com/sass/node-sass/releases/download/v4.14.1/
+
 WORKDIR /app
 
-# Copy package files
 COPY package*.json ./
+# RUN npm install -g pnpm
+RUN npm install
 
-# Install dependencies with legacy peer deps flag
-RUN npm install --legacy-peer-deps
-
-# Copy source code
 COPY . .
-
-# Remove old config files
-RUN rm -f .postcssrc.js .babelrc
-
-# Build for production
 RUN npm run build
 
-# Production stage
 FROM nginx:alpine
+COPY --from=0 /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/nginx.conf
 
-# Copy built files
-COPY --from=build /app/dist /usr/share/nginx/html
-
-# Create nginx config
-RUN echo 'server { \
-    listen 80; \
-    server_name localhost; \
-    root /usr/share/nginx/html; \
-    index index.html; \
-    \
-    location / { \
-        try_files $uri $uri/ /index.html; \
-    } \
-    \
-    # Health check endpoint \
-    location /health { \
-        access_log off; \
-        return 200 "healthy\n"; \
-        add_header Content-Type text/plain; \
-    } \
-}' > /etc/nginx/conf.d/default.conf
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost/health || exit 1
-
-EXPOSE 80
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]

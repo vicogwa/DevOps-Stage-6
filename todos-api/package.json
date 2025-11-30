@@ -1,40 +1,25 @@
 {
   "name": "todos-api",
-  "version": "2.0.0",
-  "description": "TODO API service with Redis and Zipkin tracing",
-  "main": "server.js",
+  "version": "1.0.0",
+  "description": "API for Todos in my little example app",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "nodemon server.js"
   },
-  "keywords": [
-    "todo",
-    "api",
-    "microservice"
-  ],
-  "author": "HNG",
+  "author": "elgris <iddqd07@yandex.ru>",
   "license": "MIT",
   "dependencies": {
-    "body-parser": "^1.20.3",
-    "compression": "^1.7.5",
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
-    "express-jwt": "^8.5.1",
-    "helmet": "^8.0.0",
-    "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0",
-    "redis": "^4.7.0",
-    "uuid": "^11.0.3",
-    "zipkin": "^0.22.0",
-    "zipkin-context-cls": "^0.22.0",
-    "zipkin-instrumentation-express": "^0.22.0",
-    "zipkin-transport-http": "^0.22.0"
+    "body-parser": "^1.18.2",
+    "express": "^4.15.4",
+    "express-jwt": "^5.3.0",
+    "memory-cache": "^0.2.0",
+    "redis": "^2.8.0",
+    "zipkin": "^0.11.2",
+    "zipkin-context-cls": "^0.11.0",
+    "zipkin-instrumentation-express": "^0.11.2",
+    "zipkin-transport-http": "^0.11.2"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
-  },
-  "engines": {
-    "node": ">=22.0.0",
-    "npm": ">=10.0.0"
+    "nodemon": "^1.11.0"
   }
 }

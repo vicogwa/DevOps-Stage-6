@@ -1,12 +1,21 @@
----
-- name: Deploy TODO Application
-  hosts: app_servers
-  become: yes
-  vars:
-    git_repo_url: "https://github.com/vicogwa/DevOps-Stage-6.git"
-    domain_name: "vicky-hng.zapto.org"
-    acme_email: "victoriafrancis885@gmail.com"
+# ---
+# - name: Deploy TODO Application
+#   hosts: app_servers
+#   become: yes
+#   vars:
+#     git_repo_url: "https://github.com/vicogwa/DevOps-Stage-6.git"
+#     domain_name: "vicky-hng.zapto.org"
+#     acme_email: "victoriafrancis885@gmail.com"
   
-  roles:
-    - dependencies
-    - deploy
+#   roles:
+#     - dependencies
+#     - deploy
+# Application configuration
+app_repo_url: "https://github.com/vicogwa/DevOps-Stage-6.git"
+app_directory: "/opt/microservices-app"
+
+# Docker configuration
+# docker_compose_version: "2.20.0"
+
+# System configuration
+timezone: "UTC"

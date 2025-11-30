@@ -1,5 +1,6 @@
 .git
 .gitignore
 README.md
-task-desc.txt
-infra/
+.env
+__pycache__
+*.pyc

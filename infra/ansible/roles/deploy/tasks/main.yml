@@ -1,63 +1,44 @@
 ---
-- name: Ensure application directory exists
+- name: Create application directory
   file:
-    path: /opt/todo-app
+    path: /opt/microservices-app
     state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
     mode: '0755'
 
 - name: Clone or update application repository
   git:
-    repo: "{{ git_repo_url }}"
-    dest: /opt/todo-app
-    version: main
+    repo: "{{ app_repo_url | default('https://github.com/vicogwa/DevOps-Stage-6.git') }}"
+    dest: /opt/microservices-app
     force: yes
+    update: yes
+  # become_user: "{{ ansible_user }}"
+  become: true
   register: git_result
 
-- name: Create letsencrypt directory
-  file:
-    path: /opt/todo-app/letsencrypt
-    state: directory
-    mode: '0755'
+# Important: Use 'absent' only to stop/remove containers
+- name: Stop and remove existing containers if code changed
+  community.docker.docker_compose_v2:
+    project_src: /opt/microservices-app
+    state: absent
+    remove_volumes: no        # safer — keeps DB/data
+  when: git_result.changed
+  become: true
 
-- name: Check if docker-compose.yml exists
-  stat:
-    path: /opt/todo-app/docker-compose.yml
-  register: compose_file
+# Build images and ensure containers are running
+- name: Build and start application containers
+  community.docker.docker_compose_v2:
+    project_src: /opt/microservices-app
+    build: always             # ensures rebuild after git update
+    state: present
+    recreate: always          # ensures clean container update
+  become: true
 
-- name: Update docker-compose.yml with domain
-  replace:
-    path: /opt/todo-app/docker-compose.yml
-    regexp: 'your-domain\.com'
-    replace: "{{ domain_name }}"
-  when: compose_file.stat.exists
-
-- name: Update docker-compose.yml with email
-  replace:
-    path: /opt/todo-app/docker-compose.yml
-    regexp: 'your-email@example\.com'
-    replace: "{{ acme_email }}"
-  when: compose_file.stat.exists
-
-- name: Pull latest Docker images
-  shell: |
-    cd /opt/todo-app
-    docker compose pull || true
-  when: compose_file.stat.exists
-
-- name: Stop existing containers
-  shell: |
-    cd /opt/todo-app
-    docker compose down || true
-  when: compose_file.stat.exists
-
-- name: Start application with Docker Compose
-  shell: |
-    cd /opt/todo-app
-    docker compose up -d --build
-  when: compose_file.stat.exists
-  register: docker_result
-
-- name: Show deployment status
-  debug:
-    msg: "Application deployed successfully"
-  when: docker_result.changed
+# Wait for the application on port 80
+- name: Wait for application to be ready
+  wait_for:
+    port: 80
+    host: "127.0.0.1"
+    delay: 5
+    timeout: 300

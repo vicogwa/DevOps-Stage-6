@@ -8,129 +8,122 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
-  TF_DIR: infra/terraform
+  TF_VAR_key_name: ${{ secrets.AWS_KEY_NAME }}
+  TF_VAR_private_key_path: ${{ secrets.PRIVATE_KEY_PATH }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
 jobs:
   terraform-plan:
     runs-on: ubuntu-latest
     outputs:
-      drift_detected: ${{ steps.plan.outputs.drift_detected }}
-    
+      has-changes: ${{ steps.plan.outputs.has-changes }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-      
+        uses: actions/checkout@v4
+
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
-      
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      
+
       - name: Terraform Init
         run: terraform init
-        working-directory: ${{ env.TF_DIR }}
-      
+        working-directory: infra/terraform
+
       - name: Terraform Plan
         id: plan
         run: |
-          terraform plan -out=tfplan -detailed-exitcode || EXIT_CODE=$?
-          if [ $EXIT_CODE -eq 2 ]; then
-            echo "drift_detected=true" >> $GITHUB_OUTPUT
-            echo "DRIFT DETECTED"
-          else
-            echo "drift_detected=false" >> $GITHUB_OUTPUT
-            echo "NO DRIFT"
-          fi
-          exit 0
-        working-directory: ${{ env.TF_DIR }}
-      
-      - name: Send Drift Alert Email
-        if: steps.plan.outputs.drift_detected == 'true'
+          terraform plan -detailed-exitcode -no-color -out=tfplan
+          echo "has-changes=$?" >> $GITHUB_OUTPUT
+        working-directory: infra/terraform
+        continue-on-error: true
+
+      - name: Check for drift
+        if: steps.plan.outputs.has-changes == '2'
+        run: |
+          echo "Infrastructure drift detected!"
+          terraform show -no-color tfplan
+        working-directory: infra/terraform
+
+      - name: Send drift notification email
+        if: steps.plan.outputs.has-changes == '2'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 587
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "⚠️ Terraform Drift Detected"
+          subject: "Infrastructure Drift Detected - Manual Approval Required"
           body: |
-            Infrastructure drift has been detected in the TODO application.
+            Infrastructure drift has been detected in the microservices application.
             
-            Please review the changes and approve the workflow run to apply.
+            Please review the changes and approve the deployment if they are expected.
             
-            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          to: ${{ secrets.ALERT_EMAIL }}
-          from: DevOps Alert System
-      
-      - name: Upload plan
-        uses: actions/upload-artifact@v3
-        with:
-          name: tfplan
-          path: ${{ env.TF_DIR }}/tfplan
+            Workflow: ${{ github.workflow }}
+            Run ID: ${{ github.run_id }}
+            Repository: ${{ github.repository }}
+            
+            View the workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: ${{ secrets.EMAIL_USERNAME }}
 
-  approval:
+      - name: Upload plan
+        if: steps.plan.outputs.has-changes == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/terraform/tfplan
+
+  manual-approval:
     needs: terraform-plan
-    if: needs.terraform-plan.outputs.drift_detected == 'true'
+    if: needs.terraform-plan.outputs.has-changes == '2'
     runs-on: ubuntu-latest
     environment: production
-    
     steps:
-      - name: Wait for approval
-        run: echo "Waiting for manual approval..."
+      - name: Manual approval required
+        run: echo "Manual approval granted for infrastructure changes"
 
   terraform-apply:
-    needs: [terraform-plan, approval]
-    if: always() && (needs.approval.result == 'success' || needs.terraform-plan.outputs.drift_detected == 'false')
+    needs: [terraform-plan, manual-approval]
+    if: always() && (needs.terraform-plan.outputs.has-changes == '0' || needs.manual-approval.result == 'success')
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-      
+        uses: actions/checkout@v4
+
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-      
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: hashicorp/setup-terraform@v3
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      
+          terraform_version: 1.5.0
+
       - name: Setup Ansible
         run: |
           sudo apt-get update
           sudo apt-get install -y ansible
-      
-      - name: Setup SSH Key
+
+      - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key.pem
-          chmod 600 ~/.ssh/deploy_key.pem
-      
+          echo "${{ secrets.PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
       - name: Terraform Init
         run: terraform init
-        working-directory: ${{ env.TF_DIR }}
-      
-      - name: Download plan
-        if: needs.terraform-plan.outputs.drift_detected == 'true'
-        uses: actions/download-artifact@v3
+        working-directory: infra/terraform
+
+      - name: Download plan (if exists)
+        if: needs.terraform-plan.outputs.has-changes == '2'
+        uses: actions/download-artifact@v4
         with:
-          name: tfplan
-          path: ${{ env.TF_DIR }}
-      
+          name: terraform-plan
+          path: infra/terraform/
+
       - name: Terraform Apply
         run: |
-          if [ "${{ needs.terraform-plan.outputs.drift_detected }}" == "true" ]; then
-            terraform apply tfplan
+          if [ -f tfplan ]; then
+            terraform apply -no-color tfplan
           else
-            terraform apply -auto-approve
+            terraform apply -auto-approve -no-color
           fi
-        working-directory: ${{ env.TF_DIR }}
+        working-directory: infra/terraform

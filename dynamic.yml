@@ -1,0 +1,108 @@
+http:
+  routers:
+    frontend:
+      rule: "Host(`localhost`)"
+      entryPoints:
+        - web
+      service: frontend
+      middlewares:
+        - redirect-to-https
+
+    frontend-secure:
+      rule: "Host(`localhost`)"
+      entryPoints:
+        - websecure
+      service: frontend
+      tls: true
+
+    auth-api:
+      rule: "Host(`localhost`) && PathPrefix(`/api/auth`)"
+      entryPoints:
+        - web
+      service: auth-api
+      middlewares:
+        - auth-strip
+
+    auth-api-secure:
+      rule: "Host(`localhost`) && PathPrefix(`/api/auth`)"
+      entryPoints:
+        - websecure
+      service: auth-api
+      middlewares:
+        - auth-strip
+      tls: true
+
+    todos-api:
+      rule: "Host(`localhost`) && PathPrefix(`/api/todos`)"
+      entryPoints:
+        - web
+      service: todos-api
+      middlewares:
+        - todos-strip
+
+    todos-api-secure:
+      rule: "Host(`localhost`) && PathPrefix(`/api/todos`)"
+      entryPoints:
+        - websecure
+      service: todos-api
+      middlewares:
+        - todos-strip
+      tls: true
+
+    users-api:
+      rule: "Host(`localhost`) && PathPrefix(`/api/users`)"
+      entryPoints:
+        - web
+      service: users-api
+      middlewares:
+        - users-strip
+
+    users-api-secure:
+      rule: "Host(`localhost`) && PathPrefix(`/api/users`)"
+      entryPoints:
+        - websecure
+      service: users-api
+      middlewares:
+        - users-strip
+      tls: true
+
+  services:
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend:8080"
+
+    auth-api:
+      loadBalancer:
+        servers:
+          - url: "http://auth-api:8081"
+
+    todos-api:
+      loadBalancer:
+        servers:
+          - url: "http://todos-api:8082"
+
+    users-api:
+      loadBalancer:
+        servers:
+          - url: "http://users-api:8083"
+
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+
+    auth-strip:
+      stripPrefix:
+        prefixes:
+          - "/api/auth"
+
+    todos-strip:
+      stripPrefix:
+        prefixes:
+          - "/api/todos"
+
+    users-strip:
+      stripPrefix:
+        prefixes:
+          - "/api/users"

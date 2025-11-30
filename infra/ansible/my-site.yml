@@ -1,0 +1,7 @@
+---
+- name: Deploy microservices application
+  hosts: app_servers
+  become: yes
+  roles:
+    - dependencies
+    - deploy
