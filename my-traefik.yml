@@ -18,5 +18,5 @@ certificatesResolvers:
     acme:
       httpChallenge:
         entryPoint: web
-      email: kayluv09@yahoo.com
+      email: victoriafrancis885@gmail.com.com
       storage: /letsencrypt/acme.json
