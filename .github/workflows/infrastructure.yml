@@ -1,27 +1,26 @@
-
 name: Infrastructure Deployment
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
       - 'infra/terraform/**'
       - 'infra/ansible/**'
-      - '.github/workflows/infrastructure.yml'
-  workflow_dispatch:
+  workflow_dispatch:  # Allow manual trigger
 
 env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.6.0
+  WORKING_DIR: infra/terraform
 
 jobs:
   terraform-plan:
     name: Terraform Plan & Drift Detection
     runs-on: ubuntu-latest
     outputs:
-      has_drift: ${{ steps.drift.outputs.has_drift }}
-      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
-    
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -38,87 +37,101 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Create terraform.tfvars
-        working-directory: infra/terraform
-        run: |
-          cat > terraform.tfvars <<EOF
-          aws_region           = "${{ env.AWS_REGION }}"
-          project_name         = "todo-app"
-          environment          = "production"
-          instance_type        = "t3.medium"
-          key_name             = "todo-app-deploy-key"
-          ssh_user             = "ubuntu"
-          ssh_private_key_path = "~/.ssh/deploy_key"
-          domain_name          = "${{ secrets.DOMAIN_NAME }}"
-          jwt_secret           = "${{ secrets.JWT_SECRET }}"
-          acme_email           = "${{ secrets.ACME_EMAIL }}"
-          github_repo          = "${{ github.server_url }}/${{ github.repository }}.git"
-          github_branch        = "${{ github.ref_name }}"
-          EOF
-
       - name: Terraform Init
-        working-directory: infra/terraform
+        working-directory: ${{ env.WORKING_DIR }}
         run: terraform init
 
-      - name: Terraform Validate
-        working-directory: infra/terraform
-        run: terraform validate
+      - name: Create terraform.tfvars
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          cat > terraform.tfvars <<EOF
+          aws_region           = "${{ secrets.AWS_REGION }}"
+          instance_type        = "t2.medium"
+          key_name             = "${{ secrets.AWS_KEY_NAME }}"
+          domain_name          = "mytodos.mooo.com"
+          ssh_private_key_path = "${{ secrets.SSH_PRIVATE_KEY_PATH }}"
+          email_for_alerts     = "${{ secrets.EMAIL_FOR_ALERTS }}"
+          github_repo_url      = "${{ github.server_url }}/${{ github.repository }}"
+          allowed_ssh_cidr     = "0.0.0.0/0"
+          EOF
 
       - name: Terraform Plan
         id: plan
-        working-directory: infra/terraform
+        working-directory: ${{ env.WORKING_DIR }}
         run: |
-          terraform plan -detailed-exitcode -out=tfplan -no-color 2>&1 | tee plan_output.txt
-          echo "exitcode=$?" >> $GITHUB_OUTPUT
-        continue-on-error: true
-
-      - name: Detect Drift
-        id: drift
-        working-directory: infra/terraform
-        run: |
-          if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
-            echo "has_drift=true" >> $GITHUB_OUTPUT
-            echo "⚠️ Infrastructure drift detected!"
+          terraform plan -detailed-exitcode -out=tfplan 2>&1 | tee plan_output.txt || true
+          
+          # Check if there are ANY changes (add, change, or destroy with non-zero values)
+          if grep -q "Plan: 0 to add, 0 to change, 0 to destroy" plan_output.txt; then
+            echo "DEBUG: No changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
           else
-            echo "has_drift=false" >> $GITHUB_OUTPUT
-            echo "✅ No infrastructure drift detected"
+            echo "DEBUG: Changes detected in plan"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
+          
+          exit 0
 
-      - name: Upload Plan Artifact
-        if: steps.drift.outputs.has_drift == 'true'
+      - name: Show Terraform Plan
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform show tfplan
+
+      - name: Debug Outputs
+        run: |
+          echo "Plan exit code: ${{ steps.plan.outputs.exit_code }}"
+          echo "Has changes: ${{ steps.plan.outputs.has_changes }}"
+          
+      - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          path: |
-            infra/terraform/tfplan
-            infra/terraform/plan_output.txt
+          path: ${{ env.WORKING_DIR }}/tfplan
           retention-days: 5
 
-  await-approval:
+      - name: Send Drift Detection Email
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "Infrastructure Drift Detected - Approval Required"
+          to: ${{ secrets.EMAIL_FOR_ALERTS }}
+          from: DevOps CI/CD Pipeline
+          body: |
+            Infrastructure drift has been detected in the TODO application.
+      
+            Changes detected:
+              - Branch: ${{ github.ref_name }}
+              - Commit: ${{ github.sha }}
+              - Triggered by: ${{ github.actor }}
+      
+              Please review the changes and approve the deployment:
+              ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  wait-for-approval:
     name: Wait for Manual Approval
     needs: terraform-plan
-    if: needs.terraform-plan.outputs.has_drift == 'true'
+    if: needs.terraform-plan.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     environment:
       name: production
     
     steps:
-      - name: Manual Approval Required
+      - name: Approval Required
         run: |
-          echo "⏳ Waiting for manual approval to proceed with Terraform apply"
-          echo "Review the plan and approve in the GitHub Actions UI"
+          echo "Waiting for manual approval to proceed with infrastructure changes..."
+          echo "Review the terraform plan and approve in the GitHub Actions UI"
 
   terraform-apply:
     name: Terraform Apply
-    needs: [terraform-plan, await-approval]
+    needs: [terraform-plan, wait-for-approval]
     if: |
       always() && 
       needs.terraform-plan.result == 'success' &&
-      (needs.await-approval.result == 'success' || needs.terraform-plan.outputs.has_drift == 'false')
+      (needs.terraform-plan.outputs.has_changes == 'false' || needs.wait-for-approval.result == 'success')
     runs-on: ubuntu-latest
-    outputs:
-      server_ip: ${{ steps.outputs.outputs.server_ip }}
-      server_id: ${{ steps.outputs.outputs.server_id }}
     
     steps:
       - name: Checkout code
@@ -135,265 +148,87 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - name: Create terraform.tfvars
-        working-directory: infra/terraform
-        run: |
-          cat > terraform.tfvars <<EOF
-          aws_region           = "${{ env.AWS_REGION }}"
-          project_name         = "todo-app"
-          environment          = "production"
-          instance_type        = "t3.medium"
-          key_name             = "todo-app-deploy-key"
-          ssh_user             = "ubuntu"
-          ssh_private_key_path = "~/.ssh/deploy_key"
-          domain_name          = "${{ secrets.DOMAIN_NAME }}"
-          jwt_secret           = "${{ secrets.JWT_SECRET }}"
-          acme_email           = "${{ secrets.ACME_EMAIL }}"
-          github_repo          = "${{ github.server_url }}/${{ github.repository }}.git"
-          github_branch        = "${{ github.ref_name }}"
-          EOF
 
       - name: Terraform Init
-        working-directory: infra/terraform
+        working-directory: ${{ env.WORKING_DIR }}
         run: terraform init
 
-      - name: Download Plan (if drift detected)
-        if: needs.terraform-plan.outputs.has_drift == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan
-          path: infra/terraform
-
-      - name: Terraform Apply
-        working-directory: infra/terraform
+      - name: Create terraform.tfvars
+        working-directory: ${{ env.WORKING_DIR }}
         run: |
-          if [ -f "tfplan" ]; then
-            terraform apply -auto-approve tfplan
-          else
-            terraform apply -auto-approve
-          fi
+          cat > terraform.tfvars <<EOF
+          aws_region           = "${{ secrets.AWS_REGION }}"
+          instance_type        = "t2.medium"
+          key_name             = "${{ secrets.AWS_KEY_NAME }}"
+          domain_name          = "mytodos.mooo.com"
+          ssh_private_key_path = "${{ secrets.SSH_PRIVATE_KEY_PATH }}"
+          email_for_alerts     = "${{ secrets.EMAIL_FOR_ALERTS }}"
+          github_repo_url      = "${{ github.server_url }}/${{ github.repository }}"
+          allowed_ssh_cidr     = "0.0.0.0/0"
+          EOF
 
-      - name: Get Outputs and Save SSH Key
-        id: outputs
-        working-directory: infra/terraform
+      - name: Setup SSH Key
         run: |
-          echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT
-          echo "server_id=$(terraform output -raw server_id)" >> $GITHUB_OUTPUT
-          
-          # Save the SSH private key that Terraform generated
-          mkdir -p /tmp/ssh
-          terraform output -raw private_key_pem > /tmp/ssh/deploy_key
-          chmod 600 /tmp/ssh/deploy_key
-
-      - name: Upload SSH Key as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ssh-key
-          path: /tmp/ssh/deploy_key
-          retention-days: 1
-
-      - name: Display Deployment Info
-        run: |
-          echo "✅ Infrastructure deployed successfully!"
-          echo "Server IP: ${{ steps.outputs.outputs.server_ip }}"
-          echo "Server ID: ${{ steps.outputs.outputs.server_id }}"
-          echo "Application URL: https://${{ secrets.DOMAIN_NAME }}"
-
-  run-ansible:
-    name: Run Ansible Deployment
-    needs: terraform-apply
-    if: success()
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
 
       - name: Install Ansible
         run: |
-          pip install ansible
-          ansible-galaxy collection install community.docker
+          sudo apt-get update
+          sudo apt-get install -y ansible
 
-      - name: Download SSH Key
-        uses: actions/download-artifact@v4
-        with:
-          name: ssh-key
-          path: /tmp/ssh/
+      - name: Terraform Apply
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform apply -auto-approve
 
-      - name: Setup SSH with Fixed Paths
+      - name: Get Outputs
+        working-directory: ${{ env.WORKING_DIR }}
+        id: outputs
         run: |
-          # Create SSH directory
-          mkdir -p ~/.ssh
-          
-          # Copy and set permissions on SSH key
-          cp /tmp/ssh/deploy_key ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          
-          # Verify the key exists and has correct permissions
-          ls -la ~/.ssh/deploy_key
-          
-          # Add host to known_hosts
-          ssh-keyscan -H ${{ needs.terraform-apply.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
-          
-          # Create SSH config for this host
-          cat > ~/.ssh/config <<EOF
-          Host todo-server
-              HostName ${{ needs.terraform-apply.outputs.server_ip }}
-              User ubuntu
-              IdentityFile ~/.ssh/deploy_key
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
-              IdentitiesOnly yes
-          EOF
-          
-          chmod 600 ~/.ssh/config
-          
-          echo "=== SSH Config ==="
-          cat ~/.ssh/config
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
+          echo "application_url=$(terraform output -raw application_url)" >> $GITHUB_OUTPUT
 
-      - name: Test Direct SSH Connection
-        run: |
-          echo "Testing direct SSH connection..."
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o IdentitiesOnly=yes ubuntu@${{ needs.terraform-apply.outputs.server_ip }} 'echo "✅ Direct SSH successful"'
-
-      - name: Test SSH via Config
-        run: |
-          echo "Testing SSH via config..."
-          ssh todo-server 'echo "✅ SSH config successful"'
-
-      - name: Wait for Instance Initialization
-        run: |
-          echo "⏳ Waiting 60 seconds for instance to complete initialization..."
-          sleep 60
-
-      - name: Create Ansible Inventory
-        run: |
-          mkdir -p infra/ansible/inventory
-          
-          # Get the actual full path
-          SSH_KEY_PATH=$(readlink -f ~/.ssh/deploy_key)
-          
-          cat > infra/ansible/inventory/hosts <<EOF
-          [app_servers]
-          todo-server
-
-          [app_servers:vars]
-          ansible_user=ubuntu
-          ansible_ssh_private_key_file=${SSH_KEY_PATH}
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes'
-          domain_name=${{ secrets.DOMAIN_NAME }}
-          jwt_secret=${{ secrets.JWT_SECRET }}
-          acme_email=${{ secrets.ACME_EMAIL }}
-          github_repo=${{ github.server_url }}/${{ github.repository }}.git
-          github_branch=${{ github.ref_name }}
-          EOF
-          
-          echo "=== Generated Inventory ==="
-          cat infra/ansible/inventory/hosts
-          
-          echo ""
-          echo "=== Verifying SSH Key Path ==="
-          echo "SSH_KEY_PATH=${SSH_KEY_PATH}"
-          ls -la ${SSH_KEY_PATH}
-
-      - name: Test Ansible Connection
-        working-directory: infra/ansible
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
-        run: |
-          echo "Testing Ansible ping..."
-          ansible all -i inventory/hosts -m ping -vvv
-
-      - name: Run Ansible Playbook
-        working-directory: infra/ansible
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
-          ANSIBLE_SSH_PIPELINING: "True"
-        run: |
-          echo "Running Ansible playbook..."
-          ansible-playbook -i inventory/hosts playbooks/deploy.yml -vv
-
-      - name: Verify deployment
-        run: |
-          echo "⏳ Waiting 45 seconds for containers to restart..."
-          sleep 45
-            
-          echo "🔍 Checking application status..."
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ubuntu@${{ steps.get-server-ip.outputs.server_ip }} << 'EOF'
-            cd /home/ubuntu/app
-            echo "=== Container Status ==="
-            docker compose ps
-              
-            echo -e "\n=== Testing Application ==="
-            curl -s http://localhost | head -5 || echo "⚠️ Application not responding yet"
-          EOF
-        continue-on-error: true
-
-  send-success-notification:
-    name: Send Success Notification
-    needs: [terraform-apply, run-ansible]
-    if: success()
-    runs-on: ubuntu-latest
-    
-    steps:
       - name: Send Success Email
+        if: success()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "✅ TODO App Infrastructure Deployed Successfully"
-          to: ${{ secrets.ALERT_EMAIL }}
-          from: DevOps Alerts <${{ secrets.EMAIL_USERNAME }}>
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "Infrastructure Deployment Successful"
+          to: ${{ secrets.EMAIL_FOR_ALERTS }}
+          from: DevOps Automation <${{ secrets.SMTP_USERNAME }}>
           body: |
-            ✅ Deployment Successful!
+            Infrastructure deployment completed successfully!
             
-            Your TODO application has been deployed successfully.
-            
-            Application URL: https://${{ secrets.DOMAIN_NAME }}
             Repository: ${{ github.repository }}
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
-            Deployed by: ${{ github.actor }}
             
-            View workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Instance IP: ${{ steps.outputs.outputs.instance_ip }}
+            Application URL: ${{ steps.outputs.outputs.application_url }}
+            
+            Your TODO application is now live!
 
-  send-failure-notification:
-    name: Send Failure Notification
-    needs: [terraform-plan, terraform-apply, run-ansible]
-    if: failure()
-    runs-on: ubuntu-latest
-    
-    steps:
       - name: Send Failure Email
+        if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "❌ TODO App Infrastructure Deployment Failed"
-          to: ${{ secrets.ALERT_EMAIL }}
-          from: DevOps Alerts <${{ secrets.EMAIL_USERNAME }}>
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "Infrastructure Deployment Failed"
+          to: ${{ secrets.EMAIL_FOR_ALERTS }}
+          from: DevOps Automation <${{ secrets.SMTP_USERNAME }}>
           body: |
-            ❌ Deployment Failed
-            
-            Infrastructure deployment encountered an error.
+            Infrastructure deployment failed!
             
             Repository: ${{ github.repository }}
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
-            Triggered by: ${{ github.actor }}
             
-            View workflow logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
+            Check the workflow logs for details:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
