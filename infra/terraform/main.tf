@@ -8,7 +8,7 @@ terraform {
    backend "s3" {
     bucket         = "devops-stage6-terraform-state"  
     key            = "devops-stage-6/terraform.tfstate"
-    region         = "us-east-2"
+    region         = "us-east-1"
     encrypt        = true
     dynamodb_table = "terraform-lock"  # ADD THIS
   }
@@ -85,3 +85,4 @@ resource "null_resource" "run_ansible" {
     instance_id = aws_instance.app_server.id
   }
 }
+
