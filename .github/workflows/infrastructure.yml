@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: us-east-2
   TF_DIR: infra/terraform
 
 jobs:
@@ -133,4 +133,5 @@ jobs:
           else
             terraform apply -auto-approve
           fi
+
         working-directory: ${{ env.TF_DIR }}
