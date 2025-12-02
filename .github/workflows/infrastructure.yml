@@ -39,7 +39,8 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init
+        run: terraform init -input=false
+        
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
@@ -232,3 +233,4 @@ jobs:
             
             Check the workflow logs for details:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
