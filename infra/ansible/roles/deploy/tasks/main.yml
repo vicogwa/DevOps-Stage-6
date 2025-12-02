@@ -1,190 +1,140 @@
 ---
-# infra/ansible/roles/deploy/tasks/main.yml
-
-- name: Create app directory
-  file:
-    path: "/home/{{ ansible_user }}/app"
-    state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: '0755'
-
-- name: Check if repository already exists
+- name: Check if application directory exists
   stat:
-    path: "/home/{{ ansible_user }}/app/.git"
-  register: git_repo
+    path: "{{ app_directory }}"
+  register: app_dir
 
-- name: Clone application repository (first time)
+- name: Clone application repository
   git:
-    repo: "https://github.com/vicogwa/DevOps-Stage-6.git"
-    dest: "/home/{{ ansible_user }}/app"
-    version: main
+    repo: "{{ github_repo_url }}"
+    dest: "{{ app_directory }}"
+    version: main  
     force: yes
-  become_user: "{{ ansible_user }}"
-  when: not git_repo.stat.exists
+  become: no
+  when: not app_dir.stat.exists
   register: git_clone
 
-- name: Pull latest changes (if repo exists)
+- name: Pull latest changes from repository
   git:
-    repo: "https://github.com/vicogwa/DevOps-Stage-6.git"
-    dest: "/home/{{ ansible_user }}/app"
+    repo: "{{ github_repo_url }}"
+    dest: "{{ app_directory }}"
     version: main
     force: yes
-  become_user: "{{ ansible_user }}"
-  when: git_repo.stat.exists
+  become: no
+  when: app_dir.stat.exists
   register: git_pull
 
-- name: Set git_result variable
-  set_fact:
-    git_result: "{{ git_clone if git_clone.changed else git_pull }}"
-
-- name: Create .env file from template
-  template:
-    src: env.j2
-    dest: "/home/{{ ansible_user }}/app/.env"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: '0644'
-  register: env_file
-
-- name: Update domain in docker-compose.yml
-  replace:
-    path: "/home/{{ ansible_user }}/app/docker-compose.yml"
-    regexp: 'vicky-hng.zapto.org\.com'
-    replace: "{{ domain_name }}"
-  when: domain_name is defined
-  register: domain_updated
-
-- name: Update email in docker-compose.yml
-  replace:
-    path: "/home/{{ ansible_user }}/app/docker-compose.yml"
-    regexp: 'victoriafrancis885@\.com'
-    replace: "{{ acme_email }}"
-  when: acme_email is defined
-  register: email_updated
+- name: Create traefik directory
+  file:
+    path: "{{ app_directory }}/traefik"
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+  become: no
 
 - name: Create letsencrypt directory
   file:
-    path: "/home/{{ ansible_user }}/app/letsencrypt"
+    path: "{{ app_directory }}/letsencrypt"
     state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
+    owner: ubuntu
+    group: ubuntu
     mode: '0755'
+  become: no
 
-- name: Create acme.json file
+- name: Create acme.json file with correct permissions
   file:
-    path: "/home/{{ ansible_user }}/app/letsencrypt/acme.json"
+    path: "{{ app_directory }}/letsencrypt/acme.json"
     state: touch
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
+    owner: ubuntu
+    group: ubuntu
+    mode: '0600'  
+  become: no
+
+- name: Ensure acme.json has correct permissions (if exists)
+  file:
+    path: "{{ app_directory }}/letsencrypt/acme.json"
+    owner: ubuntu
+    group: ubuntu
     mode: '0600'
+  become: no
 
-- name: Stop existing containers
-  community.docker.docker_compose:
-    project_src: "/home/{{ ansible_user }}/app"
-    state: absent
-  ignore_errors: yes
-  when: git_result.changed or env_file.changed or domain_updated.changed or email_updated.changed
+- name: Deploy Traefik configuration
+  template:
+    src: traefik.yml.j2
+    dest: "{{ app_directory }}/traefik/traefik.yml"
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+  become: no
+  register: traefik_config
 
-- name: Build Docker images
-  community.docker.docker_compose:
-    project_src: "/home/{{ ansible_user }}/app"
-    build: yes
+- name: Deploy .env file
+  template:
+    src: .env.j2
+    dest: "{{ app_directory }}/.env"
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+  become: no
+  register: env_file
+
+- name: Create Docker network
+  docker_network:
+    name: web
     state: present
-    pull: yes
-  environment:
-    COMPOSE_HTTP_TIMEOUT: "200"
-  when: git_result.changed or env_file.changed or domain_updated.changed or email_updated.changed
-  register: docker_build
+  become: no
 
-- name: Start services with docker-compose
-  community.docker.docker_compose:
-    project_src: "/home/{{ ansible_user }}/app"
-    state: present
-  environment:
-    COMPOSE_HTTP_TIMEOUT: "200"
-  register: docker_compose_result
+- name: Stop running containers if configuration changed
+  shell: |
+    cd {{ app_directory }}
+    docker-compose down
+  become: no
+  when: traefik_config.changed or env_file.changed or git_pull.changed
 
-- name: Wait for Docker containers to be healthy
-  shell: docker compose ps --format json | jq -r '.[].Health' | grep -v "healthy" || true
-  args:
-    chdir: "/home/{{ ansible_user }}/app"
-  register: unhealthy_containers
-  until: unhealthy_containers.stdout == ""
-  retries: 20
+- name: Pull Docker images
+  shell: |
+    cd {{ app_directory }}
+    docker-compose pull
+  become: no
+  register: docker_pull
+  changed_when: "'Downloaded' in docker_pull.stdout or 'Pulled' in docker_pull.stdout"
+
+- name: Build and start Docker containers
+  shell: |
+    cd {{ app_directory }}
+    docker-compose up -d --build
+  become: no
+  register: docker_up
+  changed_when: "'Creating' in docker_up.stdout or 'Starting' in docker_up.stdout or 'Recreating' in docker_up.stdout"
+
+- name: Wait for services to be healthy
+  shell: |
+    cd {{ app_directory }}
+    docker-compose ps
+  become: no
+  register: compose_status
+  until: compose_status.rc == 0
+  retries: 5
   delay: 10
-  ignore_errors: yes
+  changed_when: false
 
-- name: Check container status
-  command: docker compose ps
-  args:
-    chdir: "/home/{{ ansible_user }}/app"
-  register: container_status
+- name: Get running containers
+  shell: docker ps
+  become: no
+  register: running_containers
+  changed_when: false
 
-- name: Display container status
+- name: Display running containers
   debug:
-    var: container_status.stdout_lines
+    var: running_containers.stdout_lines
 
-- name: Wait for Traefik HTTP
-  wait_for:
-    port: 80
-    host: localhost
-    delay: 10
-    timeout: 60
-  ignore_errors: yes
+- name: Verify Traefik is running
+  shell: docker logs traefik --tail 20
+  become: no
+  register: traefik_logs
+  changed_when: false
 
-- name: Wait for Traefik HTTPS
-  wait_for:
-    port: 443
-    host: localhost
-    delay: 20
-    timeout: 300
-  ignore_errors: yes
-
-- name: Check Traefik health
-  uri:
-    url: "http://localhost:8080/api/overview"
-    return_content: yes
-    status_code: 200
-  register: traefik_health
-  until: traefik_health.status == 200
-  retries: 10
-  delay: 10
-  ignore_errors: yes
-
-- name: Wait for application to be ready
-  uri:
-    url: "http://localhost"
-    status_code: 200,301,302
-    validate_certs: no
-  register: app_health
-  until: app_health.status in [200, 301, 302]
-  retries: 15
-  delay: 10
-  ignore_errors: yes
-
-- name: Clean up old Docker images
-  command: docker image prune -af
-  when: docker_build.changed
-  ignore_errors: yes
-
-- name: Get application logs
-  command: docker compose logs --tail=50
-  args:
-    chdir: "/home/{{ ansible_user }}/app"
-  register: app_logs
-  ignore_errors: yes
-
-- name: Display recent application logs
+- name: Display Traefik status
   debug:
-    msg: "{{ app_logs.stdout_lines }}"
-  when: app_logs.stdout_lines is defined
-
-- name: Deployment summary
-  debug:
-    msg:
-      - "Deployment completed successfully!"
-      - "Application URL: https://{{ domain_name }}"
-      - "Traefik Dashboard: http://{{ ansible_host }}:8080"
-      - "Git status: {{ 'Updated' if git_result.changed else 'No changes' }}"
-      - "Docker status: {{ 'Rebuilt' if docker_build.changed else 'Already up to date' }}"
+    msg: "Traefik is running. Check logs for SSL certificate generation."
