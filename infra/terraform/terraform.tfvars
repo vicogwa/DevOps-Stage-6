@@ -1,0 +1,8 @@
+aws_region           = "us-east-1"  
+instance_type        = "t2.medium"
+key_name             = "chess-app-key-p"  
+domain_name          = "mytodos.mooo.com"
+ssh_private_key_path = "/home/Downloads/chess-app-key-p.pem"  
+email_for_alerts     = "adewumi0110@gmail.com"
+github_repo_url      = "https://github.com/vicogwa/DevOps-Stage-6"
+allowed_ssh_cidr     = "0.0.0.0/0"  
