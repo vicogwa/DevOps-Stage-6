@@ -18,7 +18,7 @@ terraform {
 
   # Remote backend for state management
   backend "s3" {
-    bucket         = "devops-stage6-terraform-state-adewumi"  
+    bucket         = "vicogwa"  
     key            = "todo-app/terraform.tfstate"
     region         = "us-east-1"  
     encrypt        = true
