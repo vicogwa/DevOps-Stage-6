@@ -1,31 +1,14 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.21-alpine AS builder
 WORKDIR /app
+COPY go.mod .
+COPY main.go .
+COPY tracing.go .
+COPY user.go .
+RUN go mod tidy
+RUN go build -o auth-api .
 
-# Install build dependencies
-RUN apk add --no-cache git ca-certificates
-
-# Copy go module files
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
-COPY . .
-
-# Build with optimizations
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-w -s" \
-    -o auth-api .
-
-# Production stage
-FROM scratch
-
-# Copy CA certificates
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-# Copy binary
-COPY --from=builder /app/auth-api /auth-api
-
-# Health check (handled by Docker HEALTHCHECK)
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/auth-api .
 EXPOSE 8080
-
-ENTRYPOINT ["/auth-api"]
+CMD ["./auth-api"]
