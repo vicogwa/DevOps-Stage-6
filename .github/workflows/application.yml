@@ -2,35 +2,104 @@ name: Application Deployment
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'frontend/**'
       - 'auth-api/**'
       - 'todos-api/**'
       - 'users-api/**'
-      - 'log-processor/**'
+      - 'log-message-processor/**'
       - 'docker-compose.yml'
+      - 'traefik/**'
   workflow_dispatch:
 
 jobs:
-  deploy:
+  deploy-application:
+    name: Deploy Application
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Setup Ansible
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform (to get instance IP)
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Get Server IP from Terraform
+        id: get_ip
+        working-directory: infra/terraform
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ansible
-      
+          terraform init
+          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
+
       - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key.pem
-          chmod 600 ~/.ssh/deploy_key.pem
-      
-      - name: Run Ansible Deployment
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ steps.get_ip.outputs.instance_ip }} >> ~/.ssh/known_hosts
+
+      - name: Install Ansible
         run: |
-          cd infra/ansible
-          ansible-playbook -i inventory playbooks/deploy.yml
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Deploy Application with Ansible
+        working-directory: infra/ansible
+        run: |
+          # Create temporary inventory
+          cat > inventory.ini <<EOF
+          [todo_servers]
+          todo_app_server ansible_host=${{ steps.get_ip.outputs.instance_ip }}
+          
+          [todo_servers:vars]
+          ansible_user=ubuntu
+          ansible_ssh_private_key_file=~/.ssh/id_rsa
+          ansible_python_interpreter=/usr/bin/python3
+          domain_name=mytodos.mooo.com
+          github_repo_url=${{ github.server_url }}/${{ github.repository }}
+          app_directory=/home/ubuntu/app
+          EOF
+          
+          # Run only the deploy role
+          ansible-playbook -i inventory.ini playbook.yml --tags deploy
+
+      - name: Verify Deployment
+        run: |
+          sleep 30  # Wait for services to start
+          curl -f https://mytodos.mooo.com || echo "Application not yet accessible"
+
+      - name: Send Deployment Email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: ${{ job.status == 'success' && 'Application Deployed Successfully' || 'Application Deployment Failed' }}
+          to: ${{ secrets.EMAIL_FOR_ALERTS }}
+          from: DevOps Automation <${{ secrets.SMTP_USERNAME }}>
+          body: |
+            Application deployment ${{ job.status }}!
+            
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Triggered by: ${{ github.actor }}
+            
+            Application URL: https://mytodos.mooo.com
+            
+            ${{ job.status == 'success' && 'Your application has been updated and is live!' || 'Check the workflow logs for error details.' }}
+            
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
