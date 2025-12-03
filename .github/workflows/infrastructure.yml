@@ -183,7 +183,7 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: |
           echo "🛠️ Initializing Terraform backend..."
-          terraform init -reconfigure -migrate-state -input=false \
+          terraform init -migrate-state -force-copy \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
@@ -266,7 +266,7 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          terraform init -reconfigure -migrate-state -input=false \
+          terraform init -migrate-state -force-copy \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
