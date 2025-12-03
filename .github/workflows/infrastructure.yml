@@ -38,24 +38,9 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      # Force unlock if a previous lock exists
-      - name: Force Terraform Unlock (if needed)
-        working-directory: ${{ env.WORKING_DIR }}
-        run: |
-          LOCK_ID=$(aws dynamodb get-item \
-            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
-            --key '{"LockID": {"S": "vicogwa/todo-app/terraform.tfstate"}}' \
-            --query 'Item.ID.S' --output text || echo "")
-          if [ -n "$LOCK_ID" ]; then
-            echo "Found existing Terraform lock: $LOCK_ID"
-            terraform force-unlock -force $LOCK_ID
-          else
-            echo "No existing Terraform lock found"
-          fi
-
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure
+        run: terraform init -reconfigure -lock-timeout=5m
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
@@ -75,7 +60,7 @@ jobs:
         id: plan
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          terraform plan -detailed-exitcode -out=tfplan 2>&1 | tee plan_output.txt || true
+          terraform plan -detailed-exitcode -lock-timeout=5m -out=tfplan 2>&1 | tee plan_output.txt || true
           if grep -q "Plan: 0 to add, 0 to change, 0 to destroy" plan_output.txt; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
@@ -150,8 +135,8 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure
+        run: terraform init -reconfigure -lock-timeout=5m
 
       - name: Terraform Apply
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -lock-timeout=5m
