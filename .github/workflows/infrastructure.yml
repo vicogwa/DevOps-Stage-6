@@ -7,7 +7,7 @@ on:
     paths:
       - 'infra/terraform/**'
       - 'infra/ansible/**'
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
@@ -62,7 +62,6 @@ jobs:
         run: |
           terraform plan -detailed-exitcode -out=tfplan 2>&1 | tee plan_output.txt || true
           
-          # Check if there are ANY changes (add, change, or destroy with non-zero values)
           if grep -q "Plan: 0 to add, 0 to change, 0 to destroy" plan_output.txt; then
             echo "DEBUG: No changes detected"
             echo "has_changes=false" >> $GITHUB_OUTPUT
