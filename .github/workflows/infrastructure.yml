@@ -110,43 +110,125 @@ jobs:
         run: |
           echo "Checking for stale locks in DynamoDB..."
           
-          # The LockID in DynamoDB is the digest of the state path
-          # Let's scan all items and check the Path attribute
-          LOCK_ITEMS=$(aws dynamodb scan \
+          # The LockID in DynamoDB is the full S3 path: bucket/key
+          LOCK_ID="${{ env.S3_BUCKET }}/${{ env.TF_STATE_KEY }}"
+          
+          echo "Looking for lock with ID: $LOCK_ID"
+          
+          # Try to get the specific lock item
+          LOCK_EXISTS=$(aws dynamodb get-item \
             --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+            --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
             --region ${{ env.AWS_REGION }} \
-            --output json 2>/dev/null || echo '{"Items":[]}')
+            --output json 2>/dev/null || echo "")
           
-          echo "DynamoDB scan result: $LOCK_ITEMS"
-          
-          # Extract LockIDs that match our state file path
-          LOCK_IDS=$(echo "$LOCK_ITEMS" | jq -r '.Items[] | select(.Path.S | contains("${{ env.TF_STATE_KEY }}")) | .LockID.S' 2>/dev/null || echo "")
-          
-          if [ -n "$LOCK_IDS" ]; then
-            echo "Found stale locks for state file ${{ env.TF_STATE_KEY }}"
-            echo "$LOCK_IDS" | while read -r LOCK_ID; do
-              if [ -n "$LOCK_ID" ]; then
-                echo "Deleting lock: $LOCK_ID"
+          if [ -n "$LOCK_EXISTS" ] && [ "$LOCK_EXISTS" != "{}" ]; then
+            echo "⚠️ Found existing lock, checking if it's stale..."
+            
+            # Extract lock creation time
+            LOCK_TIME=$(echo "$LOCK_EXISTS" | jq -r '.Item.Info.S' | grep -oP 'Created:\s*\K[^Z]+' || echo "")
+            
+            if [ -n "$LOCK_TIME" ]; then
+              echo "Lock created at: $LOCK_TIME"
+              
+              # Calculate lock age in seconds
+              LOCK_TIMESTAMP=$(date -d "$LOCK_TIME" +%s 2>/dev/null || echo "0")
+              CURRENT_TIMESTAMP=$(date +%s)
+              LOCK_AGE=$((CURRENT_TIMESTAMP - LOCK_TIMESTAMP))
+              
+              echo "Lock age: ${LOCK_AGE} seconds"
+              
+              # If lock is older than 15 minutes (900 seconds), consider it stale
+              if [ $LOCK_AGE -gt 900 ] || [ $LOCK_TIMESTAMP -eq 0 ]; then
+                echo "🗑️ Lock is stale (older than 15 minutes), removing it..."
                 aws dynamodb delete-item \
                   --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
                   --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
                   --region ${{ env.AWS_REGION }}
-                echo "✅ Deleted lock: $LOCK_ID"
+                echo "✅ Stale lock removed"
+              else
+                echo "⏳ Lock is recent (less than 15 minutes old)"
+                echo "This might indicate another workflow is running."
+                echo "Waiting 30 seconds before proceeding..."
+                sleep 30
+                
+                # Check again if lock still exists
+                LOCK_STILL_EXISTS=$(aws dynamodb get-item \
+                  --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                  --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                  --region ${{ env.AWS_REGION }} \
+                  --output json 2>/dev/null || echo "")
+                
+                if [ -n "$LOCK_STILL_EXISTS" ] && [ "$LOCK_STILL_EXISTS" != "{}" ]; then
+                  echo "⚠️ Lock still exists after waiting. This may cause terraform init to fail."
+                  echo "If you're certain no other workflow is running, manually run:"
+                  echo "aws dynamodb delete-item --table-name ${{ env.DYNAMODB_LOCK_TABLE }} --key '{\"LockID\": {\"S\": \"$LOCK_ID\"}}'"
+                else
+                  echo "✅ Lock was released by other process"
+                fi
               fi
-            done
+            else
+              echo "⚠️ Could not determine lock age, forcing removal..."
+              aws dynamodb delete-item \
+                --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                --region ${{ env.AWS_REGION }}
+              echo "✅ Lock removed"
+            fi
           else
-            echo "No stale locks found"
+            echo "✅ No existing locks found"
           fi
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: |
           echo "🛠️ Initializing Terraform backend..."
-          terraform init -reconfigure -input=false \
+          terraform init -migrate-state -force-copy \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
             -backend-config="key=${{ env.TF_STATE_KEY }}"
+
+      - name: Import Existing Resources (if needed)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          echo "Checking for existing resources to import..."
+          
+          # Import security group if it exists
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=todo-app-security-group" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          if [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+            echo "Found existing security group: $SG_ID"
+            if ! terraform state show aws_security_group.todo_app_sg 2>/dev/null; then
+              echo "Importing security group into state..."
+              terraform import aws_security_group.todo_app_sg "$SG_ID" 2>&1 || true
+            else
+              echo "Security group already in state"
+            fi
+          fi
+          
+          # Import EC2 instance if it exists
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=todo-app-server" "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            echo "Found existing EC2 instance: $INSTANCE_ID"
+            if ! terraform state show aws_instance.todo_app_server 2>/dev/null; then
+              echo "Importing EC2 instance into state..."
+              terraform import aws_instance.todo_app_server "$INSTANCE_ID" 2>&1 || true
+            else
+              echo "EC2 instance already in state"
+            fi
+          fi
+          
+          echo "✅ Import check complete"
 
       - name: Terraform Validate
         working-directory: ${{ env.WORKING_DIR }}
@@ -225,7 +307,7 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          terraform init -reconfigure -input=false \
+          terraform init -migrate-state -force-copy \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
