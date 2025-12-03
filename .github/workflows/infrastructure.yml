@@ -40,6 +40,7 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: terraform init -reconfigure
+        # Note: DO NOT use -migrate-state here - it conflicts with -reconfigure
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
@@ -152,6 +153,7 @@ jobs:
       - name: Terraform Init 
         working-directory: ${{ env.WORKING_DIR }}
         run: terraform init -reconfigure
+        # Note: DO NOT use -migrate-state here - it conflicts with -reconfigure
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
