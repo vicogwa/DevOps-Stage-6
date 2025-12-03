@@ -109,7 +109,7 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: |
           echo "🛠️ Initializing Terraform backend..."
-          terraform init -reconfigure \
+          terraform init -reconfigure -input=false \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
@@ -131,21 +131,21 @@ jobs:
           if [ -n "$LOCK_ID" ] && [ "$LOCK_ID" != "None" ]; then
             echo "Found stale lock, attempting to clear..."
             # Re-init to be able to use force-unlock
-            terraform init -reconfigure \
+            terraform init -reconfigure -input=false \
               -backend-config="bucket=${{ env.S3_BUCKET }}" \
               -backend-config="region=${{ env.AWS_REGION }}" \
               -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
               -backend-config="key=${{ env.TF_STATE_KEY }}" || true
             terraform force-unlock -force "$LOCK_ID" || true
             # Try init again after unlock
-            terraform init -reconfigure \
+            terraform init -reconfigure -input=false \
               -backend-config="bucket=${{ env.S3_BUCKET }}" \
               -backend-config="region=${{ env.AWS_REGION }}" \
               -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
               -backend-config="key=${{ env.TF_STATE_KEY }}"
           else
             echo "No lock found, re-running init..."
-            terraform init -reconfigure \
+            terraform init -reconfigure -input=false \
               -backend-config="bucket=${{ env.S3_BUCKET }}" \
               -backend-config="region=${{ env.AWS_REGION }}" \
               -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
@@ -229,7 +229,7 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          terraform init -reconfigure \
+          terraform init -reconfigure -input=false \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
