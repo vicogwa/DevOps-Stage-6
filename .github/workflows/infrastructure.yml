@@ -36,11 +36,10 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure
+        run: terraform init -input=false
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
@@ -61,7 +60,6 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: |
           terraform plan -detailed-exitcode -out=tfplan 2>&1 | tee plan_output.txt || true
-          
           if grep -q "Plan: 0 to add, 0 to change, 0 to destroy" plan_output.txt; then
             echo "DEBUG: No changes detected"
             echo "has_changes=false" >> $GITHUB_OUTPUT
@@ -69,7 +67,6 @@ jobs:
             echo "DEBUG: Changes detected in plan"
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
-          
           exit 0
 
       - name: Show Terraform Plan
@@ -78,7 +75,6 @@ jobs:
 
       - name: Debug Outputs
         run: |
-          echo "Plan exit code: ${{ steps.plan.outputs.exit_code }}"
           echo "Has changes: ${{ steps.plan.outputs.has_changes }}"
 
       - name: Upload Terraform Plan
@@ -117,6 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
+    
     steps:
       - name: Approval Required
         run: |
@@ -147,11 +144,10 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
 
-      - name: Terraform Init 
+      - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure
+        run: terraform init -input=false
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
