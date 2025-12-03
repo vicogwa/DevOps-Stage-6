@@ -191,7 +191,6 @@ jobs:
 
       - name: Import Existing Resources (if needed)
         working-directory: ${{ env.WORKING_DIR }}
-        continue-on-error: true
         run: |
           echo "Checking for existing resources to import..."
           
@@ -206,7 +205,7 @@ jobs:
             echo "Found existing security group: $SG_ID"
             if ! terraform state show aws_security_group.todo_app_sg 2>/dev/null; then
               echo "Importing security group into state..."
-              terraform import aws_security_group.todo_app_sg "$SG_ID" || echo "Import failed or already exists"
+              terraform import aws_security_group.todo_app_sg "$SG_ID" 2>&1 || true
             else
               echo "Security group already in state"
             fi
@@ -223,7 +222,7 @@ jobs:
             echo "Found existing EC2 instance: $INSTANCE_ID"
             if ! terraform state show aws_instance.todo_app_server 2>/dev/null; then
               echo "Importing EC2 instance into state..."
-              terraform import aws_instance.todo_app_server "$INSTANCE_ID" || echo "Import failed or already exists"
+              terraform import aws_instance.todo_app_server "$INSTANCE_ID" 2>&1 || true
             else
               echo "EC2 instance already in state"
             fi
