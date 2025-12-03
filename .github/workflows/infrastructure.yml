@@ -110,27 +110,73 @@ jobs:
         run: |
           echo "Checking for stale locks in DynamoDB..."
           
-          # Scan for any locks related to our state file
-          LOCKS=$(aws dynamodb scan \
-            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
-            --filter-expression "contains(#path, :statefile)" \
-            --expression-attribute-names '{"#path":"Path"}' \
-            --expression-attribute-values '{":statefile":{"S":"${{ env.TF_STATE_KEY }}"}}' \
-            --query 'Items[].LockID.S' \
-            --output text 2>/dev/null || echo "")
+          # The LockID in DynamoDB is the full S3 path: bucket/key
+          LOCK_ID="${{ env.S3_BUCKET }}/${{ env.TF_STATE_KEY }}"
           
-          if [ -n "$LOCKS" ] && [ "$LOCKS" != "None" ]; then
-            echo "Found stale locks, clearing them..."
-            for LOCK_ID in $LOCKS; do
-              echo "Deleting lock: $LOCK_ID"
+          echo "Looking for lock with ID: $LOCK_ID"
+          
+          # Try to get the specific lock item
+          LOCK_EXISTS=$(aws dynamodb get-item \
+            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+            --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+            --region ${{ env.AWS_REGION }} \
+            --output json 2>/dev/null || echo "")
+          
+          if [ -n "$LOCK_EXISTS" ] && [ "$LOCK_EXISTS" != "{}" ]; then
+            echo "⚠️ Found existing lock, checking if it's stale..."
+            
+            # Extract lock creation time
+            LOCK_TIME=$(echo "$LOCK_EXISTS" | jq -r '.Item.Info.S' | grep -oP 'Created:\s*\K[^Z]+' || echo "")
+            
+            if [ -n "$LOCK_TIME" ]; then
+              echo "Lock created at: $LOCK_TIME"
+              
+              # Calculate lock age in seconds
+              LOCK_TIMESTAMP=$(date -d "$LOCK_TIME" +%s 2>/dev/null || echo "0")
+              CURRENT_TIMESTAMP=$(date +%s)
+              LOCK_AGE=$((CURRENT_TIMESTAMP - LOCK_TIMESTAMP))
+              
+              echo "Lock age: ${LOCK_AGE} seconds"
+              
+              # If lock is older than 15 minutes (900 seconds), consider it stale
+              if [ $LOCK_AGE -gt 900 ] || [ $LOCK_TIMESTAMP -eq 0 ]; then
+                echo "🗑️ Lock is stale (older than 15 minutes), removing it..."
+                aws dynamodb delete-item \
+                  --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                  --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                  --region ${{ env.AWS_REGION }}
+                echo "✅ Stale lock removed"
+              else
+                echo "⏳ Lock is recent (less than 15 minutes old)"
+                echo "This might indicate another workflow is running."
+                echo "Waiting 30 seconds before proceeding..."
+                sleep 30
+                
+                # Check again if lock still exists
+                LOCK_STILL_EXISTS=$(aws dynamodb get-item \
+                  --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                  --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                  --region ${{ env.AWS_REGION }} \
+                  --output json 2>/dev/null || echo "")
+                
+                if [ -n "$LOCK_STILL_EXISTS" ] && [ "$LOCK_STILL_EXISTS" != "{}" ]; then
+                  echo "⚠️ Lock still exists after waiting. This may cause terraform init to fail."
+                  echo "If you're certain no other workflow is running, manually run:"
+                  echo "aws dynamodb delete-item --table-name ${{ env.DYNAMODB_LOCK_TABLE }} --key '{\"LockID\": {\"S\": \"$LOCK_ID\"}}'"
+                else
+                  echo "✅ Lock was released by other process"
+                fi
+              fi
+            else
+              echo "⚠️ Could not determine lock age, forcing removal..."
               aws dynamodb delete-item \
                 --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
                 --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
-                --region ${{ env.AWS_REGION }} || echo "Failed to delete lock $LOCK_ID"
-            done
-            echo "✅ Stale locks cleared"
+                --region ${{ env.AWS_REGION }}
+              echo "✅ Lock removed"
+            fi
           else
-            echo "No stale locks found"
+            echo "✅ No existing locks found"
           fi
 
       - name: Terraform Init
