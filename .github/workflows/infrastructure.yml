@@ -38,7 +38,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -input=false -reconfigure -migrate-state=false
+        run: terraform init -input=false -lock=false -reconfigure -migrate-state=false
 
       - name: Create terraform.tfvars
         id: create-tfvars
@@ -178,4 +178,5 @@ jobs:
             Commit: ${{ github.sha }}
             Check workflow logs:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
 
