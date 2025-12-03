@@ -105,6 +105,34 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Clear any stale Terraform locks
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          echo "Checking for stale locks in DynamoDB..."
+          
+          # Scan for any locks related to our state file
+          LOCKS=$(aws dynamodb scan \
+            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+            --filter-expression "contains(#path, :statefile)" \
+            --expression-attribute-names '{"#path":"Path"}' \
+            --expression-attribute-values '{":statefile":{"S":"${{ env.TF_STATE_KEY }}"}}' \
+            --query 'Items[].LockID.S' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$LOCKS" ] && [ "$LOCKS" != "None" ]; then
+            echo "Found stale locks, clearing them..."
+            for LOCK_ID in $LOCKS; do
+              echo "Deleting lock: $LOCK_ID"
+              aws dynamodb delete-item \
+                --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                --region ${{ env.AWS_REGION }} || echo "Failed to delete lock $LOCK_ID"
+            done
+            echo "✅ Stale locks cleared"
+          else
+            echo "No stale locks found"
+          fi
+
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: |
@@ -114,43 +142,6 @@ jobs:
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
             -backend-config="key=${{ env.TF_STATE_KEY }}"
-        continue-on-error: true
-
-      - name: Force Terraform Unlock (if init failed due to lock)
-        if: failure()
-        working-directory: ${{ env.WORKING_DIR }}
-        run: |
-          echo "Attempting to clear any stale locks..."
-          LOCK_ID=$(aws dynamodb scan \
-            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
-            --filter-expression "begins_with(LockID, :key)" \
-            --expression-attribute-values '{":key":{"S":"${{ env.TF_STATE_KEY }}"}}' \
-            --query 'Items[0].LockID.S' \
-            --output text 2>/dev/null || echo "")
-          
-          if [ -n "$LOCK_ID" ] && [ "$LOCK_ID" != "None" ]; then
-            echo "Found stale lock, attempting to clear..."
-            # Re-init to be able to use force-unlock
-            terraform init -reconfigure -input=false \
-              -backend-config="bucket=${{ env.S3_BUCKET }}" \
-              -backend-config="region=${{ env.AWS_REGION }}" \
-              -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
-              -backend-config="key=${{ env.TF_STATE_KEY }}" || true
-            terraform force-unlock -force "$LOCK_ID" || true
-            # Try init again after unlock
-            terraform init -reconfigure -input=false \
-              -backend-config="bucket=${{ env.S3_BUCKET }}" \
-              -backend-config="region=${{ env.AWS_REGION }}" \
-              -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
-              -backend-config="key=${{ env.TF_STATE_KEY }}"
-          else
-            echo "No lock found, re-running init..."
-            terraform init -reconfigure -input=false \
-              -backend-config="bucket=${{ env.S3_BUCKET }}" \
-              -backend-config="region=${{ env.AWS_REGION }}" \
-              -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
-              -backend-config="key=${{ env.TF_STATE_KEY }}"
-          fi
 
       - name: Terraform Validate
         working-directory: ${{ env.WORKING_DIR }}
