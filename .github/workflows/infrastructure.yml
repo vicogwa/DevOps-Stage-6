@@ -7,7 +7,7 @@ on:
     paths:
       - 'infra/terraform/**'
       - 'infra/ansible/**'
-  workflow_dispatch:
+  workflow_dispatch:  # Allow manual trigger
 
 env:
   AWS_REGION: us-east-1
@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
-
+      
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure -migrate-state
+        run: terraform init -reconfigure
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
@@ -76,6 +76,11 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
         run: terraform show tfplan
 
+      - name: Debug Outputs
+        run: |
+          echo "Plan exit code: ${{ steps.plan.outputs.exit_code }}"
+          echo "Has changes: ${{ steps.plan.outputs.has_changes }}"
+
       - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
         with:
@@ -102,8 +107,8 @@ jobs:
               - Commit: ${{ github.sha }}
               - Triggered by: ${{ github.actor }}
       
-              Please review the changes and approve the deployment:
-              ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Please review the changes and approve the deployment:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   wait-for-approval:
     name: Wait for Manual Approval
@@ -112,7 +117,6 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-    
     steps:
       - name: Approval Required
         run: |
@@ -145,9 +149,9 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Terraform Init
+      - name: Terraform Init 
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure -migrate-state
+        run: terraform init -reconfigure
 
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
