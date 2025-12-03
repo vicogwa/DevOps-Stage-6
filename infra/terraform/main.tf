@@ -6,15 +6,33 @@ provider "aws" {
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
-
+  
   filter {
     name   = "name"
     values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
-
+  
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
+  }
+}
+
+# Generate SSH key pair
+resource "tls_private_key" "ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+# Create AWS key pair from generated public key
+resource "aws_key_pair" "deployer" {
+  key_name   = "todo-app-deploy-key"
+  public_key = tls_private_key.ssh_key.public_key_openssh
+
+  tags = {
+    Name        = "todo-app-deploy-key"
+    Environment = "production"
+    ManagedBy   = "Terraform"
   }
 }
 
@@ -22,7 +40,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_security_group" "todo_app_sg" {
   name        = "todo-app-security-group"
   description = "Security group for TODO application"
-
+  
   # SSH
   ingress {
     from_port   = 22
@@ -31,7 +49,7 @@ resource "aws_security_group" "todo_app_sg" {
     cidr_blocks = [var.allowed_ssh_cidr]
     description = "SSH access"
   }
-
+  
   # HTTP
   ingress {
     from_port   = 80
@@ -40,7 +58,7 @@ resource "aws_security_group" "todo_app_sg" {
     cidr_blocks = ["0.0.0.0/0"]
     description = "HTTP access"
   }
-
+  
   # HTTPS
   ingress {
     from_port   = 443
@@ -49,7 +67,7 @@ resource "aws_security_group" "todo_app_sg" {
     cidr_blocks = ["0.0.0.0/0"]
     description = "HTTPS access"
   }
-
+  
   # Allow all outbound traffic
   egress {
     from_port   = 0
@@ -58,13 +76,13 @@ resource "aws_security_group" "todo_app_sg" {
     cidr_blocks = ["0.0.0.0/0"]
     description = "All outbound traffic"
   }
-
+  
   tags = {
     Name        = "todo-app-sg"
     Environment = "production"
     ManagedBy   = "Terraform"
   }
-
+  
   lifecycle {
     create_before_destroy = true
   }
@@ -74,27 +92,27 @@ resource "aws_security_group" "todo_app_sg" {
 resource "aws_instance" "todo_app_server" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
-  key_name               = var.key_name
+  key_name               = aws_key_pair.deployer.key_name  # Use generated key
   vpc_security_group_ids = [aws_security_group.todo_app_sg.id]
-
+  
   root_block_device {
     volume_size           = 30
     volume_type           = "gp3"
     delete_on_termination = true
   }
-
+  
   user_data = <<-EOF
               #!/bin/bash
               apt-get update
               apt-get install -y python3 python3-pip
               EOF
-
+  
   tags = {
     Name        = "todo-app-server"
     Environment = "production"
     ManagedBy   = "Terraform" 
   }
-
+  
   lifecycle {
     create_before_destroy = true
     ignore_changes        = [user_data]
@@ -110,18 +128,17 @@ resource "local_file" "ansible_inventory" {
     github_repo_url = var.github_repo_url
   })
   filename = "${path.module}/../ansible/inventory.ini"
-
   depends_on = [aws_instance.todo_app_server]
 }
 
 # Wait for instance to be ready
 resource "null_resource" "wait_for_instance" {
   depends_on = [aws_instance.todo_app_server, local_file.ansible_inventory]
-
+  
   provisioner "local-exec" {
     command = "sleep 60"  # Wait for instance to fully boot
   }
-
+  
   triggers = {
     instance_id = aws_instance.todo_app_server.id
   }
@@ -130,14 +147,14 @@ resource "null_resource" "wait_for_instance" {
 # Run Ansible playbook after Terraform provisioning
 resource "null_resource" "run_ansible" {
   depends_on = [null_resource.wait_for_instance]
-
+  
   provisioner "local-exec" {
     command = <<-EOT
       cd ${path.module}/../ansible && \
       ansible-playbook -i inventory.ini playbook.yml
     EOT
   }
-
+  
   triggers = {
     instance_id        = aws_instance.todo_app_server.id
     inventory_content  = local_file.ansible_inventory.content
