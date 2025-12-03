@@ -19,7 +19,7 @@ env:
 
 jobs:
   setup-backend:
-    name: Setup Terraform Backend
+    name: Setup Terraform Backend (if needed)
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials
@@ -29,26 +29,50 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Ensure S3 Bucket Exists
+      - name: Check and Create S3 Bucket
         run: |
-          if ! aws s3api head-bucket --bucket "${{ env.S3_BUCKET }}" 2>/dev/null; then
+          if aws s3api head-bucket --bucket "${{ env.S3_BUCKET }}" 2>/dev/null; then
+            echo "✅ S3 bucket already exists"
+          else
             echo "Creating S3 bucket..."
-            aws s3api create-bucket --bucket "${{ env.S3_BUCKET }}" --region "${{ env.AWS_REGION }}"
-            aws s3api put-bucket-versioning --bucket "${{ env.S3_BUCKET }}" --versioning-configuration Status=Enabled
-            aws s3api put-bucket-encryption --bucket "${{ env.S3_BUCKET }}" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-            aws s3api put-public-access-block --bucket "${{ env.S3_BUCKET }}" --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+            aws s3api create-bucket \
+              --bucket "${{ env.S3_BUCKET }}" \
+              --region "${{ env.AWS_REGION }}"
+            aws s3api put-bucket-versioning \
+              --bucket "${{ env.S3_BUCKET }}" \
+              --versioning-configuration Status=Enabled
+            aws s3api put-bucket-encryption \
+              --bucket "${{ env.S3_BUCKET }}" \
+              --server-side-encryption-configuration '{
+                "Rules": [{
+                  "ApplyServerSideEncryptionByDefault": {
+                    "SSEAlgorithm": "AES256"
+                  }
+                }]
+              }'
+            aws s3api put-public-access-block \
+              --bucket "${{ env.S3_BUCKET }}" \
+              --public-access-block-configuration \
+                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+            echo "✅ S3 bucket created and configured"
           fi
 
-      - name: Ensure DynamoDB Lock Table Exists
+      - name: Check and Create DynamoDB Table
         run: |
-          if ! aws dynamodb describe-table --table-name "${{ env.DYNAMODB_LOCK_TABLE }}" 2>/dev/null; then
+          if aws dynamodb describe-table --table-name "${{ env.DYNAMODB_LOCK_TABLE }}" --region "${{ env.AWS_REGION }}" 2>/dev/null; then
+            echo "✅ DynamoDB table already exists"
+          else
+            echo "Creating DynamoDB table..."
             aws dynamodb create-table \
               --table-name "${{ env.DYNAMODB_LOCK_TABLE }}" \
               --attribute-definitions AttributeName=LockID,AttributeType=S \
               --key-schema AttributeName=LockID,KeyType=HASH \
               --billing-mode PAY_PER_REQUEST \
               --region "${{ env.AWS_REGION }}"
-            aws dynamodb wait table-exists --table-name "${{ env.DYNAMODB_LOCK_TABLE }}" --region "${{ env.AWS_REGION }}"
+            aws dynamodb wait table-exists \
+              --table-name "${{ env.DYNAMODB_LOCK_TABLE }}" \
+              --region "${{ env.AWS_REGION }}"
+            echo "✅ DynamoDB table created"
           fi
 
   terraform-plan:
@@ -56,10 +80,11 @@ jobs:
     needs: setup-backend
     runs-on: ubuntu-latest
     outputs:
-      has_drift: ${{ steps.detect.outputs.has_drift }}
+      has_drift: ${{ steps.drift.outputs.has_drift }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -73,14 +98,42 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Clear Stale Locks
+      - name: Clear any stale Terraform locks
         working-directory: ${{ env.WORKING_DIR }}
         run: |
+          echo "Checking for stale locks in DynamoDB..."
           LOCK_ID="${{ env.S3_BUCKET }}/${{ env.TF_STATE_KEY }}"
-          LOCK_EXISTS=$(aws dynamodb get-item --table-name ${{ env.DYNAMODB_LOCK_TABLE }} --key "{\"LockID\":{\"S\":\"$LOCK_ID\"}}" --region ${{ env.AWS_REGION }} --output json 2>/dev/null || echo "")
+          LOCK_EXISTS=$(aws dynamodb get-item \
+            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+            --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+            --region ${{ env.AWS_REGION }} \
+            --output json 2>/dev/null || echo "")
           if [ -n "$LOCK_EXISTS" ] && [ "$LOCK_EXISTS" != "{}" ]; then
-            echo "Removing stale lock..."
-            aws dynamodb delete-item --table-name ${{ env.DYNAMODB_LOCK_TABLE }} --key "{\"LockID\":{\"S\":\"$LOCK_ID\"}}" --region ${{ env.AWS_REGION }}
+            echo "⚠️ Found existing lock, checking if it's stale..."
+            LOCK_TIME=$(echo "$LOCK_EXISTS" | jq -r '.Item.Info.S' | grep -oP 'Created:\s*\K[^Z]+' || echo "")
+            if [ -n "$LOCK_TIME" ]; then
+              LOCK_TIMESTAMP=$(date -d "$LOCK_TIME" +%s 2>/dev/null || echo "0")
+              CURRENT_TIMESTAMP=$(date +%s)
+              LOCK_AGE=$((CURRENT_TIMESTAMP - LOCK_TIMESTAMP))
+              if [ $LOCK_AGE -gt 900 ] || [ $LOCK_TIMESTAMP -eq 0 ]; then
+                echo "🗑️ Lock is stale, removing..."
+                aws dynamodb delete-item \
+                  --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                  --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                  --region ${{ env.AWS_REGION }}
+              else
+                echo "⏳ Lock is recent, waiting..."
+                sleep 30
+              fi
+            else
+              echo "⚠️ Could not determine lock age, removing..."
+              aws dynamodb delete-item \
+                --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+                --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+                --region ${{ env.AWS_REGION }}
+            fi
+          else
+            echo "✅ No existing locks found"
           fi
 
       - name: Terraform Init
@@ -92,32 +145,60 @@ jobs:
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
             -backend-config="key=${{ env.TF_STATE_KEY }}"
 
-      - name: Import Existing Resources
+      - name: Import Existing Resources (if needed)
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          # Import security group
-          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=todo-app-security-group" --query 'SecurityGroups[0].GroupId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-          if [ -n "$SG_ID" ] && ! terraform state show aws_security_group.todo_app_sg 2>/dev/null; then
-            terraform import aws_security_group.todo_app_sg "$SG_ID"
+          echo "Checking for existing resources to import..."
+          terraform state rm aws_instance.app_server 2>/dev/null || echo "Old app_server not in state"
+          terraform state rm aws_security_group.app_sg 2>/dev/null || echo "Old app_sg not in state"
+          terraform state rm local_file.ansible_inventory 2>/dev/null || echo "Old inventory file not in state"
+          terraform state rm null_resource.run_ansible 2>/dev/null || echo "Old ansible resource not in state"
+
+          KEY_EXISTS=$(aws ec2 describe-key-pairs \
+            --key-names todo-app-deploy-key \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          if [ -z "$KEY_EXISTS" ]; then
+            echo "⚠️ SSH key pair 'todo-app-deploy-key' not found"
           fi
 
-          # Import EC2 instance
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=todo-app-server" "Name=instance-state-name,Values=running,stopped" --query 'Reservations[0].Instances[0].InstanceId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-          if [ -n "$INSTANCE_ID" ] && ! terraform state show aws_instance.todo_app_server 2>/dev/null; then
-            terraform import aws_instance.todo_app_server "$INSTANCE_ID"
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=todo-app-security-group" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          if [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+            if ! terraform state show aws_security_group.todo_app_sg 2>/dev/null; then
+              terraform import aws_security_group.todo_app_sg "$SG_ID" 2>&1 || true
+            fi
           fi
 
-      - name: Terraform Validate & Plan
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=todo-app-server" "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            if ! terraform state show aws_instance.todo_app_server 2>/dev/null; then
+              terraform import aws_instance.todo_app_server "$INSTANCE_ID" 2>&1 || true
+            fi
+          fi
+          echo "✅ Import check complete"
+
+      - name: Terraform Validate
+        working-directory: ${{ env.WORKING_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
         id: plan
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          terraform validate
           terraform plan -detailed-exitcode -out=tfplan -no-color 2>&1 | tee plan_output.txt
           echo "exitcode=$?" >> $GITHUB_OUTPUT
         continue-on-error: true
 
       - name: Detect Drift
-        id: detect
+        id: drift
+        working-directory: ${{ env.WORKING_DIR }}
         run: |
           if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
             echo "has_drift=true" >> $GITHUB_OUTPUT
@@ -126,7 +207,7 @@ jobs:
           fi
 
       - name: Upload Plan Artifact
-        if: steps.detect.outputs.has_drift == 'true'
+        if: steps.drift.outputs.has_drift == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
@@ -135,152 +216,3 @@ jobs:
             infra/terraform/plan_output.txt
           retention-days: 5
 
-  await-approval:
-    name: Await Manual Approval
-    needs: terraform-plan
-    if: needs.terraform-plan.outputs.has_drift == 'true'
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - run: echo "⏳ Waiting for manual approval to proceed with Terraform apply"
-
-  terraform-apply:
-    name: Terraform Apply
-    needs: [terraform-plan, await-approval]
-    if: always() && (needs.await-approval.result == 'success' || needs.terraform-plan.outputs.has_drift == 'false')
-    runs-on: ubuntu-latest
-    outputs:
-      server_ip: ${{ steps.outputs.outputs.server_ip }}
-      server_id: ${{ steps.outputs.outputs.server_id }}
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - name: Terraform Init & Apply
-        working-directory: ${{ env.WORKING_DIR }}
-        run: |
-          terraform init -migrate-state -force-copy \
-            -backend-config="bucket=${{ env.S3_BUCKET }}" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
-            -backend-config="key=${{ env.TF_STATE_KEY }}"
-          if [ -f "tfplan" ]; then
-            terraform apply -auto-approve tfplan
-          else
-            terraform apply -auto-approve
-          fi
-
-      - name: Get Outputs & Save SSH Key
-        id: outputs
-        working-directory: ${{ env.WORKING_DIR }}
-        run: |
-          echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT
-          echo "server_id=$(terraform output -raw server_id)" >> $GITHUB_OUTPUT
-          mkdir -p /tmp/ssh
-          terraform output -raw private_key_pem > /tmp/ssh/deploy_key
-          chmod 600 /tmp/ssh/deploy_key
-
-      - name: Upload SSH Key
-        uses: actions/upload-artifact@v4
-        with:
-          name: ssh-key
-          path: /tmp/ssh/deploy_key
-          retention-days: 1
-
-  run-ansible:
-    name: Ansible Deployment
-    needs: terraform-apply
-    if: success()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: python-version: '3.11'
-      - run: |
-          pip install ansible
-          ansible-galaxy collection install community.docker
-      - uses: actions/download-artifact@v4
-        with: name: ssh-key path: /tmp/ssh
-      - name: Setup SSH & Inventory
-        run: |
-          mkdir -p ~/.ssh
-          cp /tmp/ssh/deploy_key ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ needs.terraform-apply.outputs.server_ip }} >> ~/.ssh/known_hosts
-          cat > infra/ansible/inventory/hosts <<EOF
-          [app_servers]
-          todo-server
-
-          [app_servers:vars]
-          ansible_user=ubuntu
-          ansible_ssh_private_key_file=$(readlink -f ~/.ssh/deploy_key)
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes'
-          domain_name=${{ secrets.DOMAIN_NAME }}
-          jwt_secret=${{ secrets.JWT_SECRET }}
-          acme_email=${{ secrets.ACME_EMAIL }}
-          github_repo=${{ github.server_url }}/${{ github.repository }}.git
-          github_branch=${{ github.ref_name }}
-          EOF
-
-      - name: Run Playbook
-        working-directory: infra/ansible
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
-          ANSIBLE_SSH_PIPELINING: "True"
-        run: ansible-playbook -i inventory/hosts playbooks/deploy.yml -vv
-
-  send-success-notification:
-    name: Success Email
-    needs: [terraform-apply, run-ansible]
-    if: success()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "✅ TODO App Infrastructure Deployed Successfully"
-          to: ${{ secrets.ALERT_EMAIL }}
-          from: DevOps Alerts <${{ secrets.EMAIL_USERNAME }}>
-          body: |
-            ✅ Deployment Successful!
-            Application URL: https://${{ secrets.DOMAIN_NAME }}
-            Repository: ${{ github.repository }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Deployed by: ${{ github.actor }}
-
-  send-failure-notification:
-    name: Failure Email
-    needs: [terraform-plan, terraform-apply, run-ansible]
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "❌ TODO App Infrastructure Deployment Failed"
-          to: ${{ secrets.ALERT_EMAIL }}
-          from: DevOps Alerts <${{ secrets.EMAIL_USERNAME }}>
-          body: |
-            ❌ Deployment Failed
-            Repository: ${{ github.repository }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Triggered by: ${{ github.actor }}
