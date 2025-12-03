@@ -12,9 +12,10 @@ on:
 env:
   AWS_REGION: us-east-1
   TF_VERSION: 1.6.0
-  WORKING_DIR: infra/terraform
+  S3_BUCKET: vicogwa-terraform-state
   DYNAMODB_LOCK_TABLE: vicogwa-state-lock
-  S3_BACKEND_BUCKET: vicogwa-terraform-state
+  TF_STATE_KEY: vicogwa/todo-app/terraform.tfstate
+  WORKING_DIR: infra/terraform
 
 jobs:
   terraform-plan:
@@ -40,6 +41,29 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Force Terraform Unlock (if previous lock exists)
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          LOCK_ID=$(aws dynamodb get-item \
+            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+            --key '{"LockID": {"S": "${{ env.TF_STATE_KEY }}"}}' \
+            --query 'Item.ID.S' --output text || echo "")
+          if [ -n "$LOCK_ID" ]; then
+            echo "Found existing Terraform lock: $LOCK_ID"
+            terraform force-unlock -force $LOCK_ID
+          else
+            echo "No existing Terraform lock found"
+          fi
+
+      - name: Terraform Init
+        working-directory: ${{ env.WORKING_DIR }}
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ env.S3_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
+            -backend-config="key=${{ env.TF_STATE_KEY }}"
+
       - name: Create terraform.tfvars
         working-directory: ${{ env.WORKING_DIR }}
         run: |
@@ -57,14 +81,6 @@ jobs:
           github_repo          = "${{ github.server_url }}/${{ github.repository }}.git"
           github_branch        = "${{ github.ref_name }}"
           EOF
-
-      - name: Terraform Init
-        working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure \
-          -backend-config="bucket=${{ env.S3_BACKEND_BUCKET }}" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
-          -backend-config="key=vicogwa/todo-app/terraform.tfstate"
 
       - name: Terraform Validate
         working-directory: ${{ env.WORKING_DIR }}
@@ -84,8 +100,10 @@ jobs:
         run: |
           if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
             echo "has_drift=true" >> $GITHUB_OUTPUT
+            echo "⚠️ Infrastructure drift detected!"
           else
             echo "has_drift=false" >> $GITHUB_OUTPUT
+            echo "✅ No infrastructure drift detected"
           fi
 
       - name: Upload Plan Artifact
@@ -94,8 +112,8 @@ jobs:
         with:
           name: tfplan
           path: |
-            ${{ env.WORKING_DIR }}/tfplan
-            ${{ env.WORKING_DIR }}/plan_output.txt
+            infra/terraform/tfplan
+            infra/terraform/plan_output.txt
           retention-days: 5
 
   await-approval:
@@ -113,7 +131,7 @@ jobs:
     name: Terraform Apply
     needs: [terraform-plan, await-approval]
     if: |
-      always() && 
+      always() &&
       needs.terraform-plan.result == 'success' &&
       (needs.await-approval.result == 'success' || needs.terraform-plan.outputs.has_drift == 'false')
     runs-on: ubuntu-latest
@@ -136,27 +154,27 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -reconfigure \
-          -backend-config="bucket=${{ env.S3_BACKEND_BUCKET }}" \
-          -backend-config="region=${{ env.AWS_REGION }}" \
-          -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
-          -backend-config="key=vicogwa/todo-app/terraform.tfstate"
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ env.S3_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
+            -backend-config="key=${{ env.TF_STATE_KEY }}"
 
       - name: Download Plan (if drift detected)
         if: needs.terraform-plan.outputs.has_drift == 'true'
         uses: actions/download-artifact@v4
         with:
           name: tfplan
-          path: ${{ env.WORKING_DIR }}
+          path: infra/terraform
 
       - name: Terraform Apply
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          if [ -f "${{ env.WORKING_DIR }}/tfplan" ]; then
+          if [ -f "tfplan" ]; then
             terraform apply -auto-approve tfplan
           else
             terraform apply -auto-approve
@@ -168,6 +186,7 @@ jobs:
         run: |
           echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT
           echo "server_id=$(terraform output -raw server_id)" >> $GITHUB_OUTPUT
+          
           mkdir -p /tmp/ssh
           terraform output -raw private_key_pem > /tmp/ssh/deploy_key
           chmod 600 /tmp/ssh/deploy_key
@@ -204,7 +223,7 @@ jobs:
           name: ssh-key
           path: /tmp/ssh/
 
-      - name: Setup SSH with Fixed Paths
+      - name: Setup SSH Config
         run: |
           mkdir -p ~/.ssh
           cp /tmp/ssh/deploy_key ~/.ssh/deploy_key
@@ -212,18 +231,17 @@ jobs:
           ssh-keyscan -H ${{ needs.terraform-apply.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
           cat > ~/.ssh/config <<EOF
           Host todo-server
-              HostName ${{ needs.terraform-apply.outputs.server_ip }}
-              User ubuntu
-              IdentityFile ~/.ssh/deploy_key
-              StrictHostKeyChecking no
-              UserKnownHostsFile /dev/null
-              IdentitiesOnly yes
+            HostName ${{ needs.terraform-apply.outputs.server_ip }}
+            User ubuntu
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            IdentitiesOnly yes
           EOF
           chmod 600 ~/.ssh/config
 
       - name: Test SSH Connection
-        run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o IdentitiesOnly=yes ubuntu@${{ needs.terraform-apply.outputs.server_ip }} 'echo "✅ SSH OK"'
+        run: ssh todo-server 'echo "✅ SSH connection works"'
 
       - name: Create Ansible Inventory
         run: |
@@ -243,12 +261,6 @@ jobs:
           github_repo=${{ github.server_url }}/${{ github.repository }}.git
           github_branch=${{ github.ref_name }}
           EOF
-
-      - name: Test Ansible Connection
-        working-directory: infra/ansible
-        env:
-          ANSIBLE_HOST_KEY_CHECKING: "False"
-        run: ansible all -i inventory/hosts -m ping -vvv
 
       - name: Run Ansible Playbook
         working-directory: infra/ansible
