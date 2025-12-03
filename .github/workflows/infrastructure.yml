@@ -189,6 +189,48 @@ jobs:
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
             -backend-config="key=${{ env.TF_STATE_KEY }}"
 
+      - name: Import Existing Resources (if needed)
+        working-directory: ${{ env.WORKING_DIR }}
+        continue-on-error: true
+        run: |
+          echo "Checking for existing resources to import..."
+          
+          # Import security group if it exists
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=todo-app-security-group" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          if [ -n "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+            echo "Found existing security group: $SG_ID"
+            if ! terraform state show aws_security_group.todo_app_sg 2>/dev/null; then
+              echo "Importing security group into state..."
+              terraform import aws_security_group.todo_app_sg "$SG_ID" || echo "Import failed or already exists"
+            else
+              echo "Security group already in state"
+            fi
+          fi
+          
+          # Import EC2 instance if it exists
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=todo-app-server" "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            echo "Found existing EC2 instance: $INSTANCE_ID"
+            if ! terraform state show aws_instance.todo_app_server 2>/dev/null; then
+              echo "Importing EC2 instance into state..."
+              terraform import aws_instance.todo_app_server "$INSTANCE_ID" || echo "Import failed or already exists"
+            else
+              echo "EC2 instance already in state"
+            fi
+          fi
+          
+          echo "✅ Import check complete"
+
       - name: Terraform Validate
         working-directory: ${{ env.WORKING_DIR }}
         run: terraform validate
