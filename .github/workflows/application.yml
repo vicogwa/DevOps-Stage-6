@@ -39,7 +39,7 @@ jobs:
         id: get_ip
         working-directory: infra/terraform
         run: |
-          terraform init
+          terraform init -input=false -reconfigure -migrate-state=false
           echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
 
       - name: Setup SSH Key
@@ -103,3 +103,4 @@ jobs:
             ${{ job.status == 'success' && 'Your application has been updated and is live!' || 'Check the workflow logs for error details.' }}
             
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
