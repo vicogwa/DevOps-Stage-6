@@ -1,44 +1,77 @@
-#!/bin/bash
-# Script to import existing AWS resources into Terraform state
+name: Infrastructure Deployment
 
-cd infra/terraform
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
-# Initialize Terraform
-terraform init -migrate-state -force-copy \
-  -backend-config="bucket=vicogwa-terraform-state" \
-  -backend-config="region=us-east-1" \
-  -backend-config="dynamodb_table=vicogwa-state-lock" \
-  -backend-config="key=vicogwa/todo-app/terraform.tfstate"
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
 
-# Import the existing security group
-# Get the security group ID first
-SG_ID=$(aws ec2 describe-security-groups \
-  --filters "Name=group-name,Values=todo-app-security-group" \
-  --query 'SecurityGroups[0].GroupId' \
-  --output text \
-  --region us-east-1)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-if [ "$SG_ID" != "None" ] && [ -n "$SG_ID" ]; then
-  echo "Found security group: $SG_ID"
-  echo "Importing into Terraform state..."
-  terraform import aws_security_group.todo_app_sg "$SG_ID"
-else
-  echo "Security group not found"
-fi
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-# Import the existing EC2 instance if it exists
-INSTANCE_ID=$(aws ec2 describe-instances \
-  --filters "Name=tag:Name,Values=todo-app-server" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].InstanceId' \
-  --output text \
-  --region us-east-1)
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
 
-if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
-  echo "Found EC2 instance: $INSTANCE_ID"
-  echo "Importing into Terraform state..."
-  terraform import aws_instance.todo_app_server "$INSTANCE_ID"
-else
-  echo "EC2 instance not found"
-fi
+      - name: Initialize Terraform Backend
+        working-directory: infra/terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=vicogwa-terraform-state" \
+            -backend-config="region=us-east-1" \
+            -backend-config="dynamodb_table=vicogwa-state-lock" \
+            -backend-config="key=vicogwa/todo-app/terraform.tfstate"
 
-echo "Import complete. Run 'terraform plan' to verify."
+      - name: Import Existing Resources
+        working-directory: infra/terraform
+        run: |
+          echo ">>> Checking SG in state..."
+          if terraform state list 2>/dev/null | grep -q aws_security_group.todo_app_sg; then
+            echo "Security group already in state. Skipping import."
+          else
+            echo ">>> Locating SG..."
+            SG_ID=$(aws ec2 describe-security-groups \
+              --filters "Name=group-name,Values=todo-app-security-group" \
+              --query 'SecurityGroups[0].GroupId' \
+              --output text)
+
+            if [ "$SG_ID" != "None" ] && [ -n "$SG_ID" ]; then
+              echo "Importing SG: $SG_ID"
+              terraform import aws_security_group.todo_app_sg "$SG_ID"
+            else
+              echo "SG not found"
+            fi
+          fi
+
+          echo ">>> Checking EC2 instance in state..."
+          if terraform state list 2>/dev/null | grep -q aws_instance.todo_app_server; then
+            echo "EC2 instance already in state. Skipping import."
+          else
+            echo ">>> Locating EC2 instance..."
+            INSTANCE_ID=$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=todo-app-server" \
+              --query 'Reservations[0].Instances[0].InstanceId' \
+              --output text)
+
+            if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
+              echo "Importing EC2 Instance: $INSTANCE_ID"
+              terraform import aws_instance.todo_app_server "$INSTANCE_ID"
+            else
+              echo "EC2 instance not found"
+            fi
+          fi
+
+      - name: Terraform Plan
+        working-directory: infra/terraform
+        run: terraform plan
