@@ -50,7 +50,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
-        run: terraform init -input=false -reconfigure -migrate-state=false
+        run: terraform init -input=false -reconfigure -migrate-state=true
 
       - name: Create terraform.tfvars
         id: create-tfvars
