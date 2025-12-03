@@ -200,6 +200,16 @@ jobs:
           terraform state rm local_file.ansible_inventory 2>/dev/null || echo "Old inventory file not in state"
           terraform state rm null_resource.run_ansible 2>/dev/null || echo "Old ansible resource not in state"
           
+          # Check if key pair exists in AWS
+          KEY_EXISTS=$(aws ec2 describe-key-pairs \
+            --key-names chess-app-key-p \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          if [ -z "$KEY_EXISTS" ]; then
+            echo "⚠️ SSH key pair 'chess-app-key-p' not found in AWS"
+            echo "Please ensure your Terraform creates the key pair or use an existing key name"
+          fi
+          
           # Import security group if it exists
           SG_ID=$(aws ec2 describe-security-groups \
             --filters "Name=group-name,Values=todo-app-security-group" \
