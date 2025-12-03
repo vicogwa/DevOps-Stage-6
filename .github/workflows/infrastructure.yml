@@ -23,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_drift: ${{ steps.drift.outputs.has_drift }}
-      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
 
     steps:
       - name: Checkout code
@@ -40,47 +39,54 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Force Terraform Unlock (if previous lock exists)
-        working-directory: ${{ env.WORKING_DIR }}
-        run: |
-          LOCK_ID=$(aws dynamodb get-item \
-            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
-            --key '{"LockID": {"S": "${{ env.TF_STATE_KEY }}"}}' \
-            --query 'Item.ID.S' --output text || echo "")
-          if [ -n "$LOCK_ID" ]; then
-            echo "Found existing Terraform lock: $LOCK_ID"
-            terraform force-unlock -force $LOCK_ID
-          else
-            echo "No existing Terraform lock found"
-          fi
+          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
         run: |
+          echo "🛠️ Initializing Terraform backend..."
           terraform init -reconfigure \
             -backend-config="bucket=${{ env.S3_BUCKET }}" \
             -backend-config="region=${{ env.AWS_REGION }}" \
             -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
             -backend-config="key=${{ env.TF_STATE_KEY }}"
+        continue-on-error: true
 
-      - name: Create terraform.tfvars
+      - name: Force Terraform Unlock (if init failed due to lock)
+        if: failure()
         working-directory: ${{ env.WORKING_DIR }}
         run: |
-          cat > terraform.tfvars <<EOF
-          aws_region           = "${{ env.AWS_REGION }}"
-          project_name         = "todo-app"
-          environment          = "production"
-          instance_type        = "t3.medium"
-          key_name             = "todo-app-deploy-key"
-          ssh_user             = "ubuntu"
-          ssh_private_key_path = "~/.ssh/deploy_key"
-          domain_name          = "${{ secrets.DOMAIN_NAME }}"
-          jwt_secret           = "${{ secrets.JWT_SECRET }}"
-          acme_email           = "${{ secrets.ACME_EMAIL }}"
-          github_repo          = "${{ github.server_url }}/${{ github.repository }}.git"
-          github_branch        = "${{ github.ref_name }}"
-          EOF
+          echo "Attempting to clear any stale locks..."
+          LOCK_ID=$(aws dynamodb scan \
+            --table-name ${{ env.DYNAMODB_LOCK_TABLE }} \
+            --filter-expression "begins_with(LockID, :key)" \
+            --expression-attribute-values '{":key":{"S":"${{ env.TF_STATE_KEY }}"}}' \
+            --query 'Items[0].LockID.S' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$LOCK_ID" ] && [ "$LOCK_ID" != "None" ]; then
+            echo "Found stale lock, attempting to clear..."
+            # Re-init to be able to use force-unlock
+            terraform init -reconfigure \
+              -backend-config="bucket=${{ env.S3_BUCKET }}" \
+              -backend-config="region=${{ env.AWS_REGION }}" \
+              -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
+              -backend-config="key=${{ env.TF_STATE_KEY }}" || true
+            terraform force-unlock -force "$LOCK_ID" || true
+            # Try init again after unlock
+            terraform init -reconfigure \
+              -backend-config="bucket=${{ env.S3_BUCKET }}" \
+              -backend-config="region=${{ env.AWS_REGION }}" \
+              -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
+              -backend-config="key=${{ env.TF_STATE_KEY }}"
+          else
+            echo "No lock found, re-running init..."
+            terraform init -reconfigure \
+              -backend-config="bucket=${{ env.S3_BUCKET }}" \
+              -backend-config="region=${{ env.AWS_REGION }}" \
+              -backend-config="dynamodb_table=${{ env.DYNAMODB_LOCK_TABLE }}" \
+              -backend-config="key=${{ env.TF_STATE_KEY }}"
+          fi
 
       - name: Terraform Validate
         working-directory: ${{ env.WORKING_DIR }}
@@ -131,7 +137,7 @@ jobs:
     name: Terraform Apply
     needs: [terraform-plan, await-approval]
     if: |
-      always() &&
+      always() && 
       needs.terraform-plan.result == 'success' &&
       (needs.await-approval.result == 'success' || needs.terraform-plan.outputs.has_drift == 'false')
     runs-on: ubuntu-latest
@@ -154,6 +160,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: ${{ env.WORKING_DIR }}
@@ -186,7 +193,6 @@ jobs:
         run: |
           echo "server_ip=$(terraform output -raw server_public_ip)" >> $GITHUB_OUTPUT
           echo "server_id=$(terraform output -raw server_id)" >> $GITHUB_OUTPUT
-          
           mkdir -p /tmp/ssh
           terraform output -raw private_key_pem > /tmp/ssh/deploy_key
           chmod 600 /tmp/ssh/deploy_key
@@ -223,30 +229,31 @@ jobs:
           name: ssh-key
           path: /tmp/ssh/
 
-      - name: Setup SSH Config
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           cp /tmp/ssh/deploy_key ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ needs.terraform-apply.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H ${{ needs.terraform-apply.outputs.server_ip }} >> ~/.ssh/known_hosts
           cat > ~/.ssh/config <<EOF
           Host todo-server
-            HostName ${{ needs.terraform-apply.outputs.server_ip }}
-            User ubuntu
-            IdentityFile ~/.ssh/deploy_key
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
-            IdentitiesOnly yes
+              HostName ${{ needs.terraform-apply.outputs.server_ip }}
+              User ubuntu
+              IdentityFile ~/.ssh/deploy_key
+              StrictHostKeyChecking no
+              UserKnownHostsFile /dev/null
+              IdentitiesOnly yes
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Test SSH Connection
-        run: ssh todo-server 'echo "✅ SSH connection works"'
+      - name: Test SSH
+        run: |
+          ssh todo-server 'echo "✅ SSH connection successful"'
 
       - name: Create Ansible Inventory
         run: |
-          mkdir -p infra/ansible/inventory
           SSH_KEY_PATH=$(readlink -f ~/.ssh/deploy_key)
+          mkdir -p infra/ansible/inventory
           cat > infra/ansible/inventory/hosts <<EOF
           [app_servers]
           todo-server
@@ -267,7 +274,8 @@ jobs:
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
           ANSIBLE_SSH_PIPELINING: "True"
-        run: ansible-playbook -i inventory/hosts playbooks/deploy.yml -vv
+        run: |
+          ansible-playbook -i inventory/hosts playbooks/deploy.yml -vv
 
   send-success-notification:
     name: Send Success Notification
@@ -293,7 +301,6 @@ jobs:
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
             Deployed by: ${{ github.actor }}
-            View workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   send-failure-notification:
     name: Send Failure Notification
@@ -318,4 +325,3 @@ jobs:
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
             Triggered by: ${{ github.actor }}
-            View workflow logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
