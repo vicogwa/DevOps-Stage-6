@@ -1,140 +1,102 @@
 ---
-- name: Check if application directory exists
-  stat:
-    path: "{{ app_directory }}"
-  register: app_dir
+# --- NEW: Wait for SSH connection ---
+- name: Wait for SSH connection to be established
+  ansible.builtin.wait_for_connection:
+    timeout: 120
+    delay: 10
 
-- name: Clone application repository
-  git:
-    repo: "{{ github_repo_url }}"
-    dest: "{{ app_directory }}"
-    version: main  
-    force: yes
-  become: no
-  when: not app_dir.stat.exists
-  register: git_clone
+# --- Ensure app directory exists ---
+- name: Ensure app directory exists
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ ansible_user | default('ubuntu') }}"
+    group: "{{ ansible_user | default('ubuntu') }}"
+    mode: '0755'
+  become: yes
 
-- name: Pull latest changes from repository
+- name: setup ssl cert
+  become: true
+  shell: |
+    curl "https://www.duckdns.org/update?domains=hasmo.duckdns.org&token=e0d700ef-4b13-4244-9b54-2601055f0eb0&ip={{ ansible_host }}"
+
+
+- name: Clone or update repository
   git:
-    repo: "{{ github_repo_url }}"
-    dest: "{{ app_directory }}"
+    repo: "{{ repo_url }}"
+    dest: "{{ app_dir }}"
     version: main
     force: yes
-  become: no
-  when: app_dir.stat.exists
-  register: git_pull
+  become_user: ubuntu
+  register: git_result
 
-- name: Create traefik directory
-  file:
-    path: "{{ app_directory }}/traefik"
+- name: Build Java application
+  shell: |
+    cd {{ app_dir }}/users-api
+    ./mvnw clean package -DskipTests
+  become_user: ubuntu
+  when: git_result.changed
+
+# --- Ensure Traefik ACME directory and acme.json exist with correct permissions ---
+- name: Ensure Traefik ACME directory exists on host
+  ansible.builtin.file:
+    path: /opt/todo-app/letsencrypt
     state: directory
-    owner: ubuntu
-    group: ubuntu
+    owner: "{{ ansible_user | default('ubuntu') }}"
+    group: "{{ ansible_user | default('ubuntu') }}"
     mode: '0755'
-  become: no
+  become: yes
 
-- name: Create letsencrypt directory
-  file:
-    path: "{{ app_directory }}/letsencrypt"
-    state: directory
-    owner: ubuntu
-    group: ubuntu
-    mode: '0755'
-  become: no
-
-- name: Create acme.json file with correct permissions
-  file:
-    path: "{{ app_directory }}/letsencrypt/acme.json"
+- name: Ensure acme.json exists with 0600 permissions
+  ansible.builtin.file:
+    path: /opt/todo-app/letsencrypt/acme.json
     state: touch
-    owner: ubuntu
-    group: ubuntu
-    mode: '0600'  
-  become: no
-
-- name: Ensure acme.json has correct permissions (if exists)
-  file:
-    path: "{{ app_directory }}/letsencrypt/acme.json"
-    owner: ubuntu
-    group: ubuntu
+    owner: "{{ ansible_user | default('ubuntu') }}"
+    group: "{{ ansible_user | default('ubuntu') }}"
     mode: '0600'
-  become: no
+  become: yes
 
-- name: Deploy Traefik configuration
-  template:
-    src: traefik.yml.j2
-    dest: "{{ app_directory }}/traefik/traefik.yml"
-    owner: ubuntu
-    group: ubuntu
-    mode: '0644'
-  become: no
-  register: traefik_config
-
-- name: Deploy .env file
-  template:
-    src: .env.j2
-    dest: "{{ app_directory }}/.env"
-    owner: ubuntu
-    group: ubuntu
-    mode: '0644'
-  become: no
-  register: env_file
-
-- name: Create Docker network
-  docker_network:
-    name: web
-    state: present
-  become: no
-
-- name: Stop running containers if configuration changed
+- name: Create docker network
+  become: true
   shell: |
-    cd {{ app_directory }}
-    docker-compose down
-  become: no
-  when: traefik_config.changed or env_file.changed or git_pull.changed
+    docker network inspect backend >/dev/null 2>&1 || docker network create backend
+  ignore_errors: yes
 
-- name: Pull Docker images
+- name: Stop existing containers
+  become: true
   shell: |
-    cd {{ app_directory }}
-    docker-compose pull
-  become: no
-  register: docker_pull
-  changed_when: "'Downloaded' in docker_pull.stdout or 'Pulled' in docker_pull.stdout"
+    cd {{ app_dir }} && docker compose -f docker-compose.yaml down
+  ignore_errors: yes
 
-- name: Build and start Docker containers
+
+- name: Check docker-compose file exists
+  become: true
   shell: |
-    cd {{ app_directory }}
-    docker-compose up -d --build
-  become: no
-  register: docker_up
-  changed_when: "'Creating' in docker_up.stdout or 'Starting' in docker_up.stdout or 'Recreating' in docker_up.stdout"
+    ls -la {{ app_dir }}/
+    ls -la {{ app_dir }}/docker-compose*
+  register: compose_files
+  ignore_errors: yes
 
-- name: Wait for services to be healthy
-  shell: |
-    cd {{ app_directory }}
-    docker-compose ps
-  become: no
-  register: compose_status
-  until: compose_status.rc == 0
-  retries: 5
-  delay: 10
-  changed_when: false
-
-- name: Get running containers
-  shell: docker ps
-  become: no
-  register: running_containers
-  changed_when: false
-
-- name: Display running containers
+- name: Debug compose files
   debug:
-    var: running_containers.stdout_lines
+    var: compose_files.stdout_lines
 
-- name: Verify Traefik is running
-  shell: docker logs traefik --tail 20
-  become: no
-  register: traefik_logs
-  changed_when: false
+- name: Build and start containers
+  become: true
+  shell: |
+    cd {{ app_dir }} && docker compose -f docker-compose.yaml up -d --build
+  when: git_result.changed
 
-- name: Display Traefik status
-  debug:
-    msg: "Traefik is running. Check logs for SSL certificate generation."
+- name: Start containers (if no changes)
+  become: true
+  shell: |
+    cd {{ app_dir }} && docker compose -f docker-compose.yaml up -d
+  when: not git_result.changed
+
+- name: Wait for services to be ready
+  wait_for:
+    port: 80
+    host: localhost
+    delay: 30
+    timeout: 300
+  
