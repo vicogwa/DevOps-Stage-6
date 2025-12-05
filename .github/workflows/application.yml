@@ -1,106 +1,139 @@
-name: Application Deployment
+name: Ansible Deploy (triggered by infra)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'frontend/**'
-      - 'auth-api/**'
-      - 'todos-api/**'
-      - 'users-api/**'
-      - 'log-message-processor/**'
-      - 'docker-compose.yml'
-      - 'traefik/**'
-  workflow_dispatch:
+  workflow_run:
+    workflows: ["Infrastructure Deployment"]
+    types: [completed]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: '1.6.0'
+  PYTHON_VERSION: '3.11'
 
 jobs:
-  deploy-application:
-    name: Deploy Application
+  deploy:
+    # only run when infra workflow succeeded
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    
+
+    # bring secrets into env so they can be referenced in steps
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_FROM_EMAIL: ${{ secrets.SMTP_FROM_EMAIL }}
+      NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (for remote backend)
+        if: ${{ env.AWS_ACCESS_KEY_ID != '' && env.AWS_SECRET_ACCESS_KEY != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Terraform (to get instance IP)
+      - name: Install Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.6.0
+          terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Get Server IP from Terraform
-        id: get_ip
-        working-directory: infra/terraform
+      - name: Terraform init (use same backend as infra)
+        working-directory: ./infra/terraform
         run: |
-          terraform init -input=false -reconfigure -migrate-state=false
-          echo "instance_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
+          terraform init -input=false
 
-      - name: Setup SSH Key
+      - name: Export Ansible files from terraform outputs (write into infra/ansible)
+        working-directory: ./infra/terraform
         run: |
+          # ensure infra/ansible exists and group_vars folder exists
+          mkdir -p ../ansible/group_vars
+
+          # extract outputs (must match exact output names in Terraform)
+          terraform output -raw ansible_inventory  > ../ansible/inventory.ini
+          terraform output -raw ansible_group_vars > ../ansible/group_vars/all.json
+
+          echo "Wrote inventory and group_vars to infra/ansible:"
+          ls -la ../ansible || true
+          ls -la ../ansible/group_vars || true
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible & dependencies (including pyyaml)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible pyyaml
+
+      - name: Setup SSH key and run Ansible
+        run: |
+          set -euo pipefail
+
+          # Write private key 
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          printf '%s' "${{ env.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ steps.get_ip.outputs.instance_ip }} >> ~/.ssh/known_hosts
 
-      - name: Install Ansible
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ansible
+          # Disable host key checking
+          export ANSIBLE_HOST_KEY_CHECKING=False
 
-      - name: Deploy Application with Ansible
-        working-directory: infra/ansible
-        run: |
-          # Create temporary inventory
-          cat > inventory.ini <<EOF
-          [todo_servers]
-          todo_app_server ansible_host=${{ steps.get_ip.outputs.instance_ip }}
-          
-          [todo_servers:vars]
-          ansible_user=ubuntu
-          ansible_ssh_private_key_file=~/.ssh/id_rsa
-          ansible_python_interpreter=/usr/bin/python3
-          domain_name=mytodos.mooo.com
-          github_repo_url=${{ github.server_url }}/${{ github.repository }}
-          app_directory=/home/ubuntu/app
-          EOF
-          
-          # Run only the deploy role
-          ansible-playbook -i inventory.ini playbook.yml --tags deploy
+          # Debug: ensure key exists and permissions are correct 
+          ls -l ~/.ssh/id_rsa
+          head -n 3 ~/.ssh/id_rsa
 
-      - name: Verify Deployment
-        run: |
-          sleep 30  # Wait for services to start
-          curl -f https://mytodos.mooo.com || echo "Application not yet accessible"
+          # Find playbook dynamically 
+          candidates=(
+            "infra/ansible/site.yml"
+            "infra/ansible/site.yaml"
+            "infra/ansible/playbook.yml"
+            "infra/ansible/playbook.yaml"
+            "infra/ansible/deploy.yml"
+            "infra/ansible/deploy.yaml"
+            "site.yml"
+            "site.yaml"
+            "playbook.yml"
+            "playbook.yaml"
+          )
+          PLAYBOOK=""
+          for p in "${candidates[@]}"; do
+            if [ -f "$p" ]; then
+              PLAYBOOK="$p"
+              break
+            fi
+          done
+          if [ -z "$PLAYBOOK" ]; then
+            echo "ERROR: No playbook found. Searched:"
+            for p in "${candidates[@]}"; do echo " - $p"; done
+            exit 1
+          fi
+          echo "Found playbook: $PLAYBOOK"
 
-      - name: Send Deployment Email
-        if: always()
+          # -Run Ansible ---
+          ansible-playbook -i infra/ansible/inventory.ini "$PLAYBOOK" --private-key ~/.ssh/id_rsa -vv
+
+      - name: Send deployment completion email (optional)
+        if: ${{ env.SMTP_SERVER != '' && env.SMTP_USERNAME != '' }}
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: smtp.gmail.com
-          server_port: 587
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: ${{ job.status == 'success' && 'Application Deployed Successfully' || 'Application Deployment Failed' }}
-          to: ${{ secrets.EMAIL_FOR_ALERTS }}
-          from: DevOps Automation <${{ secrets.SMTP_USERNAME }}>
+          server_address: ${{ env.SMTP_SERVER }}
+          server_port: ${{ env.SMTP_PORT }}
+          username: ${{ env.SMTP_USERNAME }}
+          password: ${{ env.SMTP_PASSWORD }}
+          subject: "Ansible deployment completed"
+          to: ${{ env.NOTIFICATION_EMAIL }}
+          from: ${{ env.SMTP_FROM_EMAIL }}
           body: |
-            Application deployment ${{ job.status }}!
-            
-            Repository: ${{ github.repository }}
-            Branch: ${{ github.ref_name }}
-            Commit: ${{ github.sha }}
-            Triggered by: ${{ github.actor }}
-            
-            Application URL: https://mytodos.mooo.com
-            
-            ${{ job.status == 'success' && 'Your application has been updated and is live!' || 'Check the workflow logs for error details.' }}
-            
-            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
+            Ansible deployment completed for infra workflow run: ${{ github.event.workflow_run.id }}
