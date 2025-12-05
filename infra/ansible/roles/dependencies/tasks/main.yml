@@ -1,10 +1,30 @@
 ---
+# --- Wait for SSH connection ---
+- name: Wait for SSH connection
+  ansible.builtin.wait_for_connection:
+    timeout: 300
+    delay: 10
+
+- name: Kill any running apt processes
+  shell: |
+    sudo pkill -f apt-get || true
+    sudo pkill -f dpkg || true
+    sudo rm -f /var/lib/dpkg/lock-frontend
+    sudo rm -f /var/lib/dpkg/lock
+    sudo dpkg --configure -a
+  changed_when: false
+  ignore_errors: yes
+
+- name: Wait for system to settle
+  pause:
+    seconds: 10
+
 - name: Update apt cache
   apt:
     update_cache: yes
     cache_valid_time: 3600
 
-- name: Install required system packages
+- name: Install required packages
   apt:
     name:
       - apt-transport-https
@@ -12,10 +32,10 @@
       - curl
       - gnupg
       - lsb-release
-      - software-properties-common
       - git
       - python3-pip
-      - python3-setuptools
+      - openjdk-11-jdk
+      - maven
     state: present
 
 - name: Add Docker GPG key
@@ -51,35 +71,12 @@
     groups: docker
     append: yes
 
-- name: Install Docker Compose (standalone)
-  get_url:
-    url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-linux-x86_64"
-    dest: /usr/local/bin/docker-compose
-    mode: '0755'
 
-- name: Create symbolic link for docker-compose
+
+- name: Create application directory
   file:
-    src: /usr/local/bin/docker-compose
-    dest: /usr/bin/docker-compose
-    state: link
-
-- name: Verify Docker installation
-  command: docker --version
-  register: docker_version
-  changed_when: false
-
-- name: Display Docker version
-  debug:
-    var: docker_version.stdout
-
-- name: Verify Docker Compose installation
-  command: docker-compose --version
-  register: compose_version
-  changed_when: false
-
-- name: Display Docker Compose version
-  debug:
-    var: compose_version.stdout
-
-- name: Reset SSH connection to allow user changes to affect ansible user
-  meta: reset_connection
+    path: "{{ app_dir }}"
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
