@@ -1,14 +1,20 @@
-FROM node:14 AS build
+FROM node:14 as build-stage
+
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN rm -f package-lock.json && npm install --legacy-peer-deps
+COPY package*.json ./
+
+RUN npm install
+
 COPY . .
+
 RUN npm run build
 
-FROM node:16-alpine
-WORKDIR /app
-RUN npm install -g http-server
-COPY --from=build /app/dist ./dist
+FROM nginx:alpine as production-stage
+
+COPY --from=build-stage /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
 EXPOSE 80
-CMD ["http-server", "./dist", "-p", "80"]
+
+CMD ["nginx", "-g", "daemon off;"]
